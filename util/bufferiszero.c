@@ -206,6 +206,7 @@ buffer_zero_avx512(const void *buf, size_t len)
 static unsigned used_accel = INIT_USED;
 static unsigned length_to_accel = INIT_LENGTH;
 static bool (*buffer_accel)(const void *, size_t) = INIT_ACCEL;
+static bool (*buffer_accel_fallback)(const void *, size_t) = INIT_ACCEL;
 
 static unsigned __attribute__((noinline))
 select_accel_cpuinfo(unsigned info)
@@ -231,6 +232,7 @@ select_accel_cpuinfo(unsigned info)
         if (info & all[i].bit) {
             length_to_accel = all[i].len;
             buffer_accel = all[i].fn;
+            buffer_accel_fallback = all[i].fn;
             return all[i].bit;
         }
     }
@@ -271,6 +273,17 @@ bool test_buffer_is_zero_next_accel(void)
     return false;
 }
 #endif
+
+void set_accel(buffer_accel_fn fn, size_t len)
+{
+    buffer_accel = fn;
+    length_to_accel = len;
+}
+
+void get_fallback_accel(buffer_accel_fn *fn)
+{
+    *fn = buffer_accel_fallback;
+}
 
 /*
  * Checks if a buffer is all zeroes
