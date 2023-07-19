@@ -191,12 +191,11 @@ static void batch_buffer_zero_task_init(struct batch_buffer_zero_task *task)
 {
     task->batch_completion.status = DSA_COMP_NONE;
     task->batch_descriptor.completion_addr = (uint64_t)&task->batch_completion;
-    task->batch_descriptor.xfer_size = 0;
+    // TODO: Ensure that we never send a batch with count <= 1
     task->batch_descriptor.desc_count = 0;
     task->batch_descriptor.opcode = DSA_OPCODE_BATCH;
     task->batch_descriptor.flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
-    task->batch_descriptor.src_addr = (uintptr_t)task->descriptors;
-    task->batch_descriptor.dst_addr = 0;
+    task->batch_descriptor.desc_list_addr = (uintptr_t)task->descriptors;
     task->status = BATCH_TASK_READY;
 }
 
@@ -316,7 +315,6 @@ buffer_zero_dsa_batch_add_task(struct batch_buffer_zero_task *batch_task,
                           &batch_task->completions[desc_count],
                           buf, len);
 
-    batch_task->batch_descriptor.xfer_size++;
     batch_task->batch_descriptor.desc_count++;
 
     return true;
