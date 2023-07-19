@@ -168,7 +168,8 @@ enum iax_completion_status {
 #define DSA_COMP_STATUS_MASK		0x7f
 #define DSA_COMP_STATUS_WRITE		0x80
 
-struct dsa_hw_desc {
+// 64-byte aligned per 8.3.2 of the spec.
+struct __attribute__((aligned(64))) dsa_hw_desc {
 	uint32_t	pasid:20;
 	uint32_t	rsvd:11;
 	uint32_t	priv:1;
