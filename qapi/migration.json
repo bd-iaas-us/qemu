@@ -497,6 +497,11 @@
 #     are present.  'return-path' capability must be enabled to use
 #     it.  (since 8.1)
 #
+# @main-zero-page: If enabled, the detection of zero pages will be
+#                  done on the main thread.  Otherwise it is done on
+#                  the multifd threads.
+#                  (since 7.1)
+#
 # Features:
 #
 # @unstable: Members @x-colo and @x-ignore-shared are experimental.
@@ -512,7 +517,8 @@
            'dirty-bitmaps', 'postcopy-blocktime', 'late-block-activate',
            { 'name': 'x-ignore-shared', 'features': [ 'unstable' ] },
            'validate-uuid', 'background-snapshot',
-           'zero-copy-send', 'postcopy-preempt', 'switchover-ack'] }
+           'zero-copy-send', 'postcopy-preempt', 'switchover-ack',
+           'main-zero-page'] }
 
 ##
 # @MigrationCapabilityStatus:
