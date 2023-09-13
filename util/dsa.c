@@ -517,7 +517,7 @@ buffer_zero_task_init_int(struct dsa_hw_desc *descriptor,
                           struct dsa_completion_record *completion)
 {
     descriptor->opcode = DSA_OPCODE_COMPVAL;
-    descriptor->flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_BOF;
+    descriptor->flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
     descriptor->comp_pattern = (uint64_t)0;
     descriptor->completion_addr = (uint64_t)completion;
 }
