@@ -923,6 +923,8 @@ static void populate_ram_info(MigrationInfo *info, MigrationState *s)
     info->ram->duplicate = stat64_get(&mig_stats.zero_pages);
     /* legacy value.  It is not used anymore */
     info->ram->skipped = 0;
+    info->ram->zero = stat64_get(&mig_stats.zero_pages);
+    info->ram->zero_bytes = info->ram->zero * page_size;
     info->ram->normal = stat64_get(&mig_stats.normal_pages);
     info->ram->normal_bytes = info->ram->normal * page_size;
     info->ram->mbps = s->mbps;
@@ -971,6 +973,11 @@ static void populate_ram_info(MigrationInfo *info, MigrationState *s)
         info->ram->dirty_pages_rate =
            stat64_get(&mig_stats.dirty_pages_rate);
     }
+
+    info->ram->check_zero_page_cycles = stat64_get(&mig_stats.check_zero_page_cycles);
+    info->ram->check_zero_page_latency = stat64_get(&mig_stats.check_zero_page_latency);
+    info->ram->channel_send_cycles = stat64_get(&mig_stats.channel_send_cycles);
+    info->ram->channel_send_latency = stat64_get(&mig_stats.channel_send_latency);
 }
 
 static void populate_disk_info(MigrationInfo *info)

@@ -79,6 +79,14 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
 
         monitor_printf(mon, "total time: %" PRIu64 " ms\n",
                        info->total_time);
+        monitor_printf(mon, "multifd zero page time: %" PRIu64 " ms\n",
+                       info->ram->check_zero_page_latency);
+        monitor_printf(mon, "check zero page cycles: %" PRIu64 " cycles\n",
+                       info->ram->check_zero_page_cycles);
+        monitor_printf(mon, "channel send latency: %" PRIu64 " ms\n",
+                       info->ram->channel_send_latency);
+        monitor_printf(mon, "channel send cycles: %" PRIu64 " cycles\n",
+                       info->ram->channel_send_cycles);
         if (info->has_expected_downtime) {
             monitor_printf(mon, "expected downtime: %" PRIu64 " ms\n",
                            info->expected_downtime);
@@ -106,6 +114,10 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
                        info->ram->duplicate);
         monitor_printf(mon, "skipped: %" PRIu64 " pages\n",
                        info->ram->skipped);
+        monitor_printf(mon, "zero: %" PRIu64 " pages\n",
+                       info->ram->zero);
+        monitor_printf(mon, "zero bytes: %" PRIu64 " kbytes\n",
+                       info->ram->zero_bytes >> 10);
         monitor_printf(mon, "normal: %" PRIu64 " pages\n",
                        info->ram->normal);
         monitor_printf(mon, "normal bytes: %" PRIu64 " kbytes\n",

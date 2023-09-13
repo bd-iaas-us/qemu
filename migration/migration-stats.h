@@ -97,6 +97,11 @@ typedef struct {
      * Total number of bytes transferred.
      */
     Stat64 transferred;
+
+    Stat64 check_zero_page_cycles;
+    Stat64 check_zero_page_latency;
+    Stat64 channel_send_cycles;
+    Stat64 channel_send_latency;
 } MigrationAtomicStats;
 
 extern MigrationAtomicStats mig_stats;

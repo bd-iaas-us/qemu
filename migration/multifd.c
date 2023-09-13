@@ -32,6 +32,8 @@
 #include "io/channel-socket.h"
 #include "yank_functions.h"
 
+#include "x86intrin.h"
+
 /* Multiple fd's */
 
 #define MULTIFD_MAGIC 0x11223344U
@@ -685,6 +687,11 @@ static void *multifd_send_thread(void *opaque)
     int ret = 0;
     bool use_zero_copy_send = migrate_zero_copy_send();
 
+    uint64_t start;
+    uint64_t end;
+    uint64_t start_cycles;
+    uint64_t end_cycles;
+
     thread = MigrationThreadAdd(p->name, qemu_get_thread_id());
 
     trace_multifd_send_thread_start(p->id);
@@ -727,8 +734,21 @@ static void *multifd_send_thread(void *opaque)
 
             for (int i = 0; i < p->pages->num; i++) {
                 uint64_t offset = p->pages->offset[i];
-                if (use_multifd_zero_page &&
-                    buffer_is_zero(rb->host + offset, p->page_size)) {
+                bool zero_page = false;
+                if (use_multifd_zero_page) {
+                    start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                    start_cycles = __rdtsc();
+                    zero_page = buffer_is_zero(rb->host + offset, p->page_size);
+                    zero_page = false;
+                    end = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                    end_cycles = __rdtsc();
+
+                    stat64_add(&mig_stats.check_zero_page_latency,
+                               end - start);
+                    stat64_add(&mig_stats.check_zero_page_cycles,
+                               end_cycles - start_cycles);
+                }
+                if (zero_page) {
                     p->zero[p->zero_num] = offset;
                     p->zero_num++;
                     ram_release_page(rb->idstr, offset);
@@ -750,9 +770,17 @@ static void *multifd_send_thread(void *opaque)
                                p->next_packet_size);
 
             if (use_zero_copy_send) {
+                start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                start_cycles = __rdtsc();
                 /* Send header first, without zerocopy */
                 ret = qio_channel_write_all(p->c, (void *)p->packet,
                                             p->packet_len, &local_err);
+                end = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                end_cycles = __rdtsc();
+                stat64_add(&mig_stats.channel_send_latency,
+                           end - start);
+                stat64_add(&mig_stats.channel_send_cycles,
+                           end_cycles - start_cycles);
                 if (ret != 0) {
                     break;
                 }
@@ -764,8 +792,16 @@ static void *multifd_send_thread(void *opaque)
                 p->iov[0].iov_base = p->packet;
             }
 
+            start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            start_cycles = __rdtsc();
             ret = qio_channel_writev_full_all(p->c, p->iov, p->iovs_num, NULL,
                                               0, p->write_flags, &local_err);
+            end = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            end_cycles = __rdtsc();
+            stat64_add(&mig_stats.channel_send_latency,
+                       end - start);
+            stat64_add(&mig_stats.channel_send_cycles,
+                       end_cycles - start_cycles);
             if (ret != 0) {
                 break;
             }
