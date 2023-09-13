@@ -1126,7 +1126,7 @@ int multifd_save_setup(Error **errp)
             (struct buffer_zero_task *)qemu_memalign(32, sizeof(*p->dsa_task));
         buffer_zero_task_init(p->dsa_task);
         p->dsa_batch_task = 
-            (struct buffer_zero_batch_task *)qemu_memalign(32, sizeof(*p->dsa_batch_task));
+            (struct buffer_zero_batch_task *)qemu_memalign(64, sizeof(*p->dsa_batch_task));
         buffer_zero_batch_task_init(p->dsa_batch_task);
         p->packet_len = sizeof(MultiFDPacket_t)
                       + sizeof(uint64_t) * page_count;

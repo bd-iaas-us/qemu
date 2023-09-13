@@ -33,10 +33,10 @@ struct buffer_zero_task {
 };
 
 struct buffer_zero_batch_task {
+    struct dsa_hw_desc batch_descriptor;
+    struct dsa_hw_desc descriptors[DSA_BATCH_SIZE] __attribute__((aligned(64)));
     struct dsa_completion_record batch_completion __attribute__((aligned(32)));
     struct dsa_completion_record completions[DSA_BATCH_SIZE] __attribute__((aligned(32)));
-    struct dsa_hw_desc batch_descriptor;
-    struct dsa_hw_desc descriptors[DSA_BATCH_SIZE];
     buffer_zero_dsa_completion_fn completion_callback;
     struct dsa_buffer_zero_completion_context completion_contexts[DSA_BATCH_SIZE];
     enum dsa_task_status status;

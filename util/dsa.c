@@ -79,10 +79,15 @@ struct dsa_completion_thread {
 static uint64_t total_bytes_checked;
 static uint64_t total_function_calls;
 static uint64_t total_success_count;
+static uint64_t total_bof_fail;
+static uint64_t total_batch_fail;
+static uint64_t total_batch_bof;
+static uint64_t total_fallback_count;
 static int max_retry_count;
 static int top_retry_count;
 
 static bool dedicated_mode;
+__attribute__((unused))
 static int length_to_accel = 64;
 
 static buffer_accel_fn buffer_zero_fallback;
@@ -347,23 +352,22 @@ static int
 poll_completion(struct dsa_completion_record *completion,
                 enum dsa_opcode opcode)
 {
+    uint8_t status;
     int retry = 0;
 
     while (true) {
-        if (completion->status != DSA_COMP_NONE) {
-            /* TODO: Error handling here. */
-            if (completion->status != DSA_COMP_SUCCESS &&
-                completion->status != DSA_COMP_PAGE_FAULT_NOBOF &&
-                completion->status != DSA_COMP_BATCH_FAIL &&
-	            completion->status != DSA_COMP_BATCH_PAGE_FAULT) {
-                fprintf(stderr, "DSA opcode %d failed with status = %d.\n",
-                    opcode, completion->status);
-                exit(1);
-            } else {
-                total_success_count++;
-                //fprintf(stderr, "poll_completion retried %d times.\n", retry);
-            }
+        // The DSA operation completes successfully or fails.
+        status = completion->status;
+        if (status == DSA_COMP_SUCCESS ||
+            status == DSA_COMP_PAGE_FAULT_NOBOF ||
+            status == DSA_COMP_BATCH_PAGE_FAULT ||
+            status == DSA_COMP_BATCH_FAIL) {
             break;
+        } else if (status != DSA_COMP_NONE) {
+            /* TODO: Error handling here on unexpected failure. */
+            fprintf(stderr, "DSA opcode %d failed with status = %d.\n",
+                    opcode, status);
+            exit(1);
         }
         retry++;
         if (retry > max_retry_count) {
@@ -372,6 +376,8 @@ poll_completion(struct dsa_completion_record *completion,
         }
         _mm_pause();
     }
+
+    //fprintf(stderr, "poll_completion retried %d times.\n", retry);
 
     if (retry > top_retry_count) {
         top_retry_count = retry;
@@ -511,7 +517,7 @@ buffer_zero_task_init_int(struct dsa_hw_desc *descriptor,
                           struct dsa_completion_record *completion)
 {
     descriptor->opcode = DSA_OPCODE_COMPVAL;
-    descriptor->flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
+    descriptor->flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_BOF;
     descriptor->comp_pattern = (uint64_t)0;
     descriptor->completion_addr = (uint64_t)completion;
 }
@@ -566,11 +572,12 @@ buffer_zero_task_set_int(struct dsa_hw_desc *descriptor,
     struct dsa_completion_record *completion = 
         (struct dsa_completion_record *)descriptor->completion_addr;
 
-    total_bytes_checked += len;
+    qatomic_add(&total_bytes_checked, len);
 
     descriptor->xfer_size = len;
     descriptor->src_addr = (uintptr_t)buf;
     completion->status = 0;
+    completion->result = 0;
 }
 
 static void
@@ -616,6 +623,7 @@ buffer_zero_batch_task_set(struct buffer_zero_batch_task *batch_task,
  * 
  * @param buf The memory buffer to be paged in.
  */
+__attribute__((unused))
 static void
 page_in(const void *buf)
 {
@@ -646,19 +654,28 @@ buffer_zero_dsa(const void *buf, size_t len)
 {
     struct buffer_zero_task task;
     struct dsa_completion_record *completion = &task.completion;
+    uint8_t status;
 
     buffer_zero_task_init(&task);
     buffer_zero_task_set(&task, buf, len);
 
-    total_function_calls++;
+    qatomic_inc(&total_function_calls);
 
-    page_in(buf);
+    //page_in(buf);
 
     submit_wi(dsa_device_instance.work_queue, &task.descriptor);
     poll_completion(completion, task.descriptor.opcode);
-
-    if (completion->status == DSA_COMP_SUCCESS) {
+    
+    status = completion->status;
+    if (status == DSA_COMP_SUCCESS) {
+        qatomic_inc(&total_success_count);
         return completion->result == 0;
+    }
+
+    assert(status == DSA_COMP_PAGE_FAULT_NOBOF);
+
+    if (status == DSA_COMP_PAGE_FAULT_NOBOF) {
+        qatomic_inc(&total_bof_fail);
     }
 
     /*
@@ -671,6 +688,7 @@ buffer_zero_dsa(const void *buf, size_t len)
     }
 
     /* Let's fallback to use CPU to complete it. */
+    qatomic_inc(&total_fallback_count);
     return buffer_zero_fallback((uint8_t *)buf + completion->bytes_completed,
                                 len - completion->bytes_completed);
 }
@@ -680,28 +698,52 @@ buffer_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
                       const void **buf, size_t count, size_t len, 
                       bool *result)
 {
+    struct dsa_completion_record *batch_completion = &batch_task->batch_completion;
     struct dsa_completion_record *completion;
+    uint8_t batch_status;
+    uint8_t status;
 
     assert(count <= DSA_BATCH_SIZE);
 
     buffer_zero_batch_task_set(batch_task, buf, count, len);
 
-    total_function_calls++;
+    qatomic_inc(&total_function_calls);
 
     //for (int i = 0; i < count; i++) {
     //    page_in(buf[i]);
     //}
 
     submit_wi(dsa_device_instance.work_queue, &batch_task->batch_descriptor);
-    poll_completion(&batch_task->batch_completion, batch_task->batch_descriptor.opcode);
+    poll_completion(batch_completion, 
+                    batch_task->batch_descriptor.opcode);
+
+    batch_status = batch_completion->status;
+    if (batch_status == DSA_COMP_BATCH_FAIL) {
+        qatomic_inc(&total_batch_fail);
+    } else if (batch_status == DSA_COMP_BATCH_PAGE_FAULT) {
+        qatomic_inc(&total_batch_bof);
+    } else {
+        assert(batch_status == DSA_COMP_SUCCESS);
+    }
 
     for (int i = 0; i < count; i++) {
 
         completion = &batch_task->completions[i];
+        status = completion->status;
 
-        if (completion->status == DSA_COMP_SUCCESS) {
+        //barrier();
+
+        if (status == DSA_COMP_SUCCESS) {
             result[i] = (completion->result == 0);
+            qatomic_inc(&total_success_count);
             continue;
+        }
+
+        if (status == DSA_COMP_PAGE_FAULT_NOBOF) {
+            qatomic_inc(&total_bof_fail);
+        } else if (status != DSA_COMP_NONE) {
+            fprintf(stderr,
+                    "Unexpected completion status = %u.\n", status);
         }
 
         /*
@@ -715,8 +757,10 @@ buffer_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
         }
 
         /* Let's fallback to use CPU to complete it. */
-        result[i] = buffer_zero_fallback((uint8_t *)buf[i] + completion->bytes_completed,
-                                         len - completion->bytes_completed);
+        qatomic_inc(&total_fallback_count);
+        result[i] =
+            buffer_zero_fallback((uint8_t *)buf[i] + completion->bytes_completed,
+                                 len - completion->bytes_completed);
     }
 }
 
@@ -741,9 +785,9 @@ buffer_zero_dsa_async(const void *buf, size_t len,
     buffer_zero_task_init(task);
     buffer_zero_task_set(task, buf, len);
 
-    total_function_calls++;
+    qatomic_inc(&total_function_calls);
 
-    page_in(buf);
+    //page_in(buf);
 
     return submit_wi_async(dsa_device_instance.work_queue, task);
 }
@@ -790,9 +834,9 @@ buffer_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task)
     assert(batch_task->batch_descriptor.desc_count <= DSA_BATCH_SIZE);
     assert(batch_task->status == DSA_TASK_READY);
 
-    for (int i = 0; i < batch_task->batch_descriptor.desc_count; i++) {
-        page_in((void*)batch_task->descriptors[i].src_addr);
-    }
+    //for (int i = 0; i < batch_task->batch_descriptor.desc_count; i++) {
+    //    page_in((void*)batch_task->descriptors[i].src_addr);
+    //}
 
     return submit_batch_wi_async(&dsa_device_instance, batch_task);
 }
@@ -813,6 +857,10 @@ int configure_dsa(const char *dsa_path)
     total_bytes_checked = 0;
     total_function_calls = 0;
     total_success_count = 0;
+    total_bof_fail = 0;
+    total_batch_bof = 0;
+    total_batch_fail = 0;
+    total_fallback_count = 0;
 
     dsa_wq = map_dsa_device(dsa_path);
     if (dsa_wq == MAP_FAILED) {
@@ -821,7 +869,12 @@ int configure_dsa(const char *dsa_path)
         return -1;
     }
 
-    set_accel(buffer_zero_dsa, length_to_accel);
+    /*
+     * TODO: Don't use DSA on the legacy path. We can enable it
+     *       if we can refactor the legacy path to do
+     *       zero-page-checking in a batch.
+     */
+    //set_accel(buffer_zero_dsa, length_to_accel);
     get_fallback_accel(&buffer_zero_fallback);
 
     dsa_device_init(&dsa_device_instance, dsa_wq);
