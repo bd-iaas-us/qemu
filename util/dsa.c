@@ -53,7 +53,6 @@ struct batch_buffer_zero_task {
     enum batch_task_status status;
 };
 
-static bool use_simulation;
 static uint64_t total_bytes_checked;
 static uint64_t total_function_calls;
 static uint64_t total_success_count;
@@ -61,7 +60,6 @@ static int max_retry_count;
 static int top_retry_count;
 
 static void *dsa_wq = MAP_FAILED;
-static uint8_t zero_page_buffer[4096];
 static bool dedicated_mode;
 static int length_to_accel = 64;
 
@@ -166,21 +164,6 @@ static int poll_completion(struct dsa_completion_record *completion,
     return 0;
 }
 
-static bool buffer_zero_dsa_simulation(const void *buf, size_t len)
-{
-    /* TODO: Handle page size greater than 4k. */
-    if (len > sizeof(zero_page_buffer)) {
-        fprintf(stderr, "Page size greater than %lu is not supported by DSA "
-                        "buffer zero checking.\n", sizeof(zero_page_buffer));
-        exit(1);
-    }
-
-    total_bytes_checked += len;
-    total_function_calls++;
-
-    return memcmp(buf, zero_page_buffer, len) == 0;
-}
-
 /**
  * @brief Initializes a buffer zero batch task.
  *
@@ -212,13 +195,6 @@ buffer_zero_task_init(struct dsa_hw_desc *descriptor,
                       struct dsa_completion_record *completion,
                       const void *buf, size_t len)
 {
-    /* TODO: Handle page size greater than 4k. */
-    if (len > sizeof(zero_page_buffer)) {
-        fprintf(stderr, "Page size greater than %lu is not supported by DSA "
-                        "buffer zero checking.\n", sizeof(zero_page_buffer));
-        exit(1);
-    }
-
     total_bytes_checked += len;
 
     //memset(&completion, 0, sizeof(completion));
@@ -357,13 +333,10 @@ static void buffer_zero_dsa_batch(struct batch_buffer_zero_task *batch_task)
 int configure_dsa(const char *dsa_path)
 {
     dedicated_mode = false;
-    use_simulation = false;
     max_retry_count = 3000;
     total_bytes_checked = 0;
     total_function_calls = 0;
     total_success_count = 0;
-
-    memset(zero_page_buffer, 0, sizeof(zero_page_buffer));
 
     dsa_wq = map_dsa_device(dsa_path);
     if (dsa_wq == MAP_FAILED) {
@@ -372,12 +345,8 @@ int configure_dsa(const char *dsa_path)
         return -1;
     }
 
-    if (use_simulation)
-        set_accel(buffer_zero_dsa_simulation, length_to_accel);
-    else {
-        set_accel(buffer_zero_dsa, length_to_accel);
-        get_fallback_accel(&buffer_zero_fallback);
-    }
+    set_accel(buffer_zero_dsa, length_to_accel);
+    get_fallback_accel(&buffer_zero_fallback);
 
     return 0;
 }
