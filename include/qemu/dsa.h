@@ -51,6 +51,7 @@ void buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
                               const void **buf, size_t count,
                               size_t len, bool *result);
 
+
 #endif
 
 #endif

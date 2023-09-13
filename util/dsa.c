@@ -598,6 +598,14 @@ buffer_zero_batch_task_init(struct buffer_zero_batch_task *task)
     }
 }
 
+void
+buffer_zero_batch_task_reset(struct buffer_zero_batch_task *task)
+{
+    task->batch_completion.status = DSA_COMP_NONE;
+    task->batch_descriptor.desc_count = 0;
+    task->status = DSA_TASK_READY;
+}
+
 static void
 buffer_zero_task_set_int(struct dsa_hw_desc *descriptor,
                          const void *buf,
@@ -645,6 +653,7 @@ buffer_zero_batch_task_set(struct buffer_zero_batch_task *batch_task,
     assert(count > 1);
     assert(count <= DSA_BATCH_SIZE);
 
+    buffer_zero_batch_task_reset(batch_task);
     for (int i = 0; i < count; i++) {
         buffer_zero_task_set_int(&batch_task->descriptors[i], buf[i], len);
     }
