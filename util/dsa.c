@@ -37,6 +37,21 @@
 #include "x86intrin.h"
 
 #define DSA_WQ_SIZE 4096
+#define DSA_BATCH_SIZE 64
+
+enum batch_task_status {
+    BATCH_TASK_READY = 0,
+    BATCH_TASK_PROCESSING,
+    BATCH_TASK_COMPLETION
+};
+
+struct batch_buffer_zero_task {
+    struct dsa_completion_record batch_completion __attribute__((aligned(32)));
+    struct dsa_completion_record completions[DSA_BATCH_SIZE] __attribute__((aligned(32)));
+    struct dsa_hw_desc batch_descriptor;
+    struct dsa_hw_desc descriptors[DSA_BATCH_SIZE];
+    enum batch_task_status status;
+};
 
 static bool use_simulation;
 static uint64_t total_bytes_checked;
@@ -167,19 +182,37 @@ static bool buffer_zero_dsa_simulation(const void *buf, size_t len)
 }
 
 /**
- * @brief Sends a memory comparison work item to a DSA device and wait
- *        for completion.
+ * @brief Initializes a buffer zero batch task.
  *
- * @param buf A pointer to the memory buffer for comparison.
- * @param len Length of the memory buffer for comparison.
- * @return true if the memory buffer is all zero, false otherwise.
+ * @param task A pointer to the batch task to initialize.
  */
-static bool buffer_zero_dsa(const void *buf, size_t len)
+__attribute__((unused))
+static void batch_buffer_zero_task_init(struct batch_buffer_zero_task *task)
 {
-    struct dsa_completion_record completion __attribute__((aligned(32)));
-    struct dsa_hw_desc descriptor;
-    uint8_t test_byte;
+    task->batch_completion.status = DSA_COMP_NONE;
+    task->batch_descriptor.completion_addr = (uint64_t)&task->batch_completion;
+    task->batch_descriptor.xfer_size = 0;
+    task->batch_descriptor.desc_count = 0;
+    task->batch_descriptor.opcode = DSA_OPCODE_BATCH;
+    task->batch_descriptor.flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
+    task->batch_descriptor.src_addr = (uintptr_t)task->descriptors;
+    task->batch_descriptor.dst_addr = 0;
+    task->status = BATCH_TASK_READY;
+}
 
+/**
+ * @brief Initializes a buffer zero task.
+ *
+ * @param descriptor A pointer to the DSA task descriptor.
+ * @param completion A pointer to the DSA task completion record.
+ * @param buf A pointer to the memory buffer to check for zero.
+ * @param len The length of the buffer.
+ */
+static void
+buffer_zero_task_init(struct dsa_hw_desc *descriptor,
+                      struct dsa_completion_record *completion,
+                      const void *buf, size_t len)
+{
     /* TODO: Handle page size greater than 4k. */
     if (len > sizeof(zero_page_buffer)) {
         fprintf(stderr, "Page size greater than %lu is not supported by DSA "
@@ -188,18 +221,22 @@ static bool buffer_zero_dsa(const void *buf, size_t len)
     }
 
     total_bytes_checked += len;
-    total_function_calls++;
 
-    memset(&completion, 0, sizeof(completion));
-    memset(&descriptor, 0, sizeof(descriptor));
+    //memset(&completion, 0, sizeof(completion));
+    //memset(&descriptor, 0, sizeof(descriptor));
 
-    descriptor.opcode = DSA_OPCODE_COMPARE;
-    descriptor.flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
-    descriptor.xfer_size = len;
-    descriptor.src_addr = (uintptr_t)buf;
-    descriptor.dst_addr = (uintptr_t)zero_page_buffer;
-    completion.status = 0;
-    descriptor.completion_addr = (uint64_t)&completion;
+    descriptor->opcode = DSA_OPCODE_COMPARE;
+    descriptor->flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
+    descriptor->xfer_size = len;
+    descriptor->src_addr = (uintptr_t)buf;
+    descriptor->dst_addr = (uintptr_t)zero_page_buffer;
+    completion->status = 0;
+    descriptor->completion_addr = (uint64_t)&completion;
+}
+
+static void page_in(const void *buf)
+{
+    uint8_t test_byte;
 
     /*
      * TODO: Find a better solution. DSA device can encounter page
@@ -211,6 +248,26 @@ static bool buffer_zero_dsa(const void *buf, size_t len)
      */
     test_byte = ((uint8_t *)buf)[0];
     ((uint8_t *)buf)[0] = test_byte;
+}
+
+/**
+ * @brief Sends a memory comparison task to a DSA device and wait
+ *        for completion.
+ *
+ * @param buf A pointer to the memory buffer for comparison.
+ * @param len Length of the memory buffer for comparison.
+ * @return true if the memory buffer is all zero, false otherwise.
+ */
+static bool buffer_zero_dsa(const void *buf, size_t len)
+{
+    struct dsa_completion_record completion __attribute__((aligned(32)));
+    struct dsa_hw_desc descriptor;
+
+    buffer_zero_task_init(&descriptor, &completion, buf, len);
+
+    total_function_calls++;
+
+    page_in(buf);
 
     submit_wi(dsa_wq, &descriptor);
     poll_completion(&completion, DSA_OPCODE_COMPARE);
@@ -231,6 +288,64 @@ static bool buffer_zero_dsa(const void *buf, size_t len)
     /* Let's fallback to use CPU to complete it. */
     return buffer_zero_fallback((uint8_t *)buf + completion.bytes_completed,
                                 len - completion.bytes_completed);
+}
+
+/**
+ * @brief Add a buffer zero task to the batch task.
+ *
+ * @param batch_task A pointer to the batch task.
+ * @param buf A pointer to the memory buffer to check for zero.
+ * @param len The length of the buffer.
+ *
+ * @return true if successful, otherwise false.
+ */
+__attribute__((unused))
+static bool
+buffer_zero_dsa_batch_add_task(struct batch_buffer_zero_task *batch_task,
+                               const void *buf, size_t len)
+{
+    int desc_count;
+
+    assert(batch_task->status == BATCH_TASK_READY);
+
+    if (batch_task->batch_descriptor.desc_count >= DSA_BATCH_SIZE)
+        return false;
+
+    desc_count = batch_task->batch_descriptor.desc_count;
+    buffer_zero_task_init(&batch_task->descriptors[desc_count],
+                          &batch_task->completions[desc_count],
+                          buf, len);
+
+    batch_task->batch_descriptor.xfer_size++;
+    batch_task->batch_descriptor.desc_count++;
+
+    return true;
+}
+
+/**
+ * @brief Sends a memory comparison batch task to a DSA device and wait
+ *        for completion.
+ *
+ * @param batch_task The batch task to be submitted to DSA device.
+ */
+__attribute__((unused))
+static void buffer_zero_dsa_batch(struct batch_buffer_zero_task *batch_task)
+{
+    assert(batch_task->batch_descriptor.desc_count <= DSA_BATCH_SIZE);
+    assert(batch_task->status == BATCH_TASK_READY);
+
+    for (int i = 0; i < batch_task->batch_descriptor.desc_count; i++) {
+        page_in((void*)batch_task->descriptors[i].src_addr);
+    }
+
+    batch_task->status = BATCH_TASK_PROCESSING;
+
+    submit_wi(dsa_wq, &batch_task->batch_descriptor);
+    poll_completion(&batch_task->batch_completion, DSA_OPCODE_BATCH);
+
+    //TODO: Poll completion on all individual tasks in the batch.
+
+    batch_task->status = BATCH_TASK_COMPLETION;
 }
 
 /**
