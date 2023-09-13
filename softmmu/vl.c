@@ -136,6 +136,7 @@
 #include "qemu/keyval.h"
 
 #define MAX_VIRTIO_CONSOLES 1
+#define MAX_DSA_DEVICES 16
 
 typedef struct BlockdevOptionsQueueEntry {
     BlockdevOptions *bdo;
@@ -161,7 +162,8 @@ static const char *mem_path;
 static const char *incoming;
 static const char *loadvm;
 static const char *accelerators;
-static const char *dsa_path;
+static const char *dsa_path[MAX_DSA_DEVICES];
+static int num_dsa_devices;
 static bool have_custom_ram_size;
 static const char *ram_memdev_id;
 static QDict *machine_opts_dict;
@@ -3521,9 +3523,8 @@ void qemu_init(int argc, char **argv)
                 configure_msg(opts);
                 break;
             case QEMU_OPTION_dsa:
-                dsa_path = optarg;
-                if (configure_dsa(dsa_path)) {
-                    exit(1);
+                if (num_dsa_devices < MAX_DSA_DEVICES) {
+                    dsa_path[num_dsa_devices++] = optarg;
                 }
                 break;
             case QEMU_OPTION_dump_vmstate:
@@ -3648,6 +3649,9 @@ void qemu_init(int argc, char **argv)
      * compat properties have been set up.
      */
     migration_object_init();
+    if (configure_dsa(dsa_path, num_dsa_devices)) {
+        exit(1);
+    }
 
     /* parse features once if machine provides default cpu_type */
     current_machine->cpu_type = machine_class->default_cpu_type;

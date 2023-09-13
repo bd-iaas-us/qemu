@@ -67,6 +67,12 @@ struct dsa_device {
     dsa_task_queue task_queue;
 };
 
+struct dsa_device_group {
+    struct dsa_device *dsa_devices;
+    int num_dsa_devices;
+    uint32_t index;
+};
+
 struct dsa_completion_thread {
     bool stopping;
     bool running;
@@ -92,7 +98,7 @@ static int length_to_accel = 64;
 
 static buffer_accel_fn buffer_zero_fallback;
 
-static struct dsa_device dsa_device_instance;
+static struct dsa_device_group dsa_group;
 
 /**
  * @brief Initializes a DSA device structure.
@@ -136,6 +142,32 @@ dsa_device_cleanup(struct dsa_device *instance)
     if (instance->work_queue != MAP_FAILED) {
         munmap(instance->work_queue, DSA_WQ_SIZE);
     }
+}
+
+static void
+dsa_device_group_init(struct dsa_device_group *group, int num_dsa_devices)
+{
+    group->dsa_devices =
+        malloc(sizeof(struct dsa_device) * num_dsa_devices);
+    group->num_dsa_devices = num_dsa_devices;
+    group->index = 0;
+}
+
+static void
+dsa_device_group_cleanup(struct dsa_device_group *group)
+{
+    for (int i = 0; i < group->num_dsa_devices; i++) {
+        dsa_device_cleanup(&group->dsa_devices[i]);
+    }
+    free(group->dsa_devices);
+}
+
+static struct dsa_device *
+dsa_device_group_get_next_device(struct dsa_device_group *group)
+{
+    uint32_t current = qatomic_fetch_inc(&group->index);
+    current %= group->num_dsa_devices;
+    return &group->dsa_devices[current];
 }
 
 /**
@@ -468,7 +500,8 @@ dsa_completion_thread_init(
 {
     completion_thread->stopping = false;
     completion_thread->running = true;
-    completion_thread->dsa_device_instance = &dsa_device_instance;
+    completion_thread->dsa_device_instance =
+        &dsa_group.dsa_devices[0];
     completion_thread->thread_id = -1;
     qemu_sem_init(&completion_thread->init_done_sem, 0);
 
@@ -557,6 +590,7 @@ buffer_zero_batch_task_init(struct buffer_zero_batch_task *task)
     task->batch_descriptor.flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
     task->batch_descriptor.desc_list_addr = (uintptr_t)task->descriptors;
     task->status = DSA_TASK_READY;
+    task->device = dsa_device_group_get_next_device(&dsa_group);    
 
     for (int i = 0; i < DSA_BATCH_SIZE; i++) {
         buffer_zero_task_init_int(&task->descriptors[i],
@@ -663,7 +697,7 @@ buffer_zero_dsa(const void *buf, size_t len)
 
     //page_in(buf);
 
-    submit_wi(dsa_device_instance.work_queue, &task.descriptor);
+    submit_wi(dsa_group.dsa_devices[0].work_queue, &task.descriptor);
     poll_completion(completion, task.descriptor.opcode);
     
     status = completion->status;
@@ -713,7 +747,7 @@ buffer_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
     //    page_in(buf[i]);
     //}
 
-    submit_wi(dsa_device_instance.work_queue, &batch_task->batch_descriptor);
+    submit_wi(batch_task->device->work_queue, &batch_task->batch_descriptor);
     poll_completion(batch_completion, 
                     batch_task->batch_descriptor.opcode);
 
@@ -789,7 +823,7 @@ buffer_zero_dsa_async(const void *buf, size_t len,
 
     //page_in(buf);
 
-    return submit_wi_async(dsa_device_instance.work_queue, task);
+    return submit_wi_async(dsa_group.dsa_devices[0].work_queue, task);
 }
 
 /**
@@ -838,7 +872,7 @@ buffer_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task)
     //    page_in((void*)batch_task->descriptors[i].src_addr);
     //}
 
-    return submit_batch_wi_async(&dsa_device_instance, batch_task);
+    return submit_batch_wi_async(batch_task->device, batch_task);
 }
 
 /**
@@ -849,7 +883,7 @@ buffer_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task)
  * @param dsa_path A pointer to the DSA device's work queue file path.
  * @return int Zero if successful, non-zero otherwise.
  */
-int configure_dsa(const char *dsa_path)
+int configure_dsa(const char **dsa_path, int num_dsa_devices)
 {
     void *dsa_wq = MAP_FAILED;
     dedicated_mode = true;
@@ -862,11 +896,16 @@ int configure_dsa(const char *dsa_path)
     total_batch_fail = 0;
     total_fallback_count = 0;
 
-    dsa_wq = map_dsa_device(dsa_path);
-    if (dsa_wq == MAP_FAILED) {
-        fprintf(stderr, "map_dsa_device failed MAP_FAILED, "
-                "using simulation.\n");
-        return -1;
+    dsa_device_group_init(&dsa_group, num_dsa_devices);
+
+    for (int i = 0; i < num_dsa_devices; i++) {
+        dsa_wq = map_dsa_device(dsa_path[i]);
+        if (dsa_wq == MAP_FAILED) {
+            fprintf(stderr, "map_dsa_device failed MAP_FAILED, "
+                    "using simulation.\n");
+            return -1;
+        }
+        dsa_device_init(&dsa_group.dsa_devices[i], dsa_wq);
     }
 
     /*
@@ -876,8 +915,6 @@ int configure_dsa(const char *dsa_path)
      */
     //set_accel(buffer_zero_dsa, length_to_accel);
     get_fallback_accel(&buffer_zero_fallback);
-
-    dsa_device_init(&dsa_device_instance, dsa_wq);
 
     return 0;
 }
@@ -889,7 +926,7 @@ int configure_dsa(const char *dsa_path)
  */
 void dsa_cleanup(void)
 {
-    dsa_device_cleanup(&dsa_device_instance);
+    dsa_device_group_cleanup(&dsa_group);
 }
 
 void buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
@@ -919,7 +956,7 @@ void buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
     exit(1);
 }
 
-int configure_dsa(const char *dsa_path)
+int configure_dsa(const char **dsa_path, int num_dsa_devices)
 {
     fprintf(stderr, "Intel Data Streaming Accelerator is not supported "
                     "on this platform.\n");
