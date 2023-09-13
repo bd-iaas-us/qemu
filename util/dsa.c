@@ -225,11 +225,11 @@ buffer_zero_task_init(struct dsa_hw_desc *descriptor,
     //memset(&completion, 0, sizeof(completion));
     //memset(&descriptor, 0, sizeof(descriptor));
 
-    descriptor->opcode = DSA_OPCODE_COMPARE;
+    descriptor->opcode = DSA_OPCODE_COMPVAL;
     descriptor->flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
     descriptor->xfer_size = len;
     descriptor->src_addr = (uintptr_t)buf;
-    descriptor->dst_addr = (uintptr_t)zero_page_buffer;
+    descriptor->comp_pattern = (uint64_t)0;
     completion->status = 0;
     descriptor->completion_addr = (uint64_t)&completion;
 }
@@ -270,7 +270,7 @@ static bool buffer_zero_dsa(const void *buf, size_t len)
     page_in(buf);
 
     submit_wi(dsa_wq, &descriptor);
-    poll_completion(&completion, DSA_OPCODE_COMPARE);
+    poll_completion(&completion, DSA_OPCODE_COMPVAL);
 
     if (completion.status == DSA_COMP_SUCCESS) {
         return completion.result == 0;
