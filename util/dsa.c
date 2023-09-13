@@ -23,9 +23,12 @@
  * THE SOFTWARE.
  */
 #include "qemu/osdep.h"
+#include "qemu/queue.h"
+#include "qemu/lockable.h"
 #include "qemu/cutils.h"
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
+#include "qemu/rcu.h"
 
 #ifdef CONFIG_DSA_OPT
 
@@ -38,11 +41,29 @@
 
 #define DSA_WQ_SIZE 4096
 #define DSA_BATCH_SIZE 64
+#define DSA_COMPLETION_THREAD "dsa_completion_thread"
 
-enum batch_task_status {
-    BATCH_TASK_READY = 0,
-    BATCH_TASK_PROCESSING,
-    BATCH_TASK_COMPLETION
+enum dsa_task_status {
+    DSA_TASK_READY = 0,
+    DSA_TASK_PROCESSING,
+    DSA_TASK_COMPLETION
+};
+
+enum dsa_task_type {
+    DSA_TASK = 0,
+    DSA_BATCH_TASK
+};
+
+struct dsa_buffer_zero_completion_context {
+    //TODO: Add context structure to feed the callback fn.
+};
+
+struct buffer_zero_task {
+    struct dsa_completion_record completion __attribute__((aligned(32)));
+    struct dsa_hw_desc descriptor;
+    buffer_zero_dsa_completion_fn completion_callback;
+    struct dsa_buffer_zero_completion_context completion_context;
+    enum dsa_task_status status;
 };
 
 struct batch_buffer_zero_task {
@@ -50,7 +71,37 @@ struct batch_buffer_zero_task {
     struct dsa_completion_record completions[DSA_BATCH_SIZE] __attribute__((aligned(32)));
     struct dsa_hw_desc batch_descriptor;
     struct dsa_hw_desc descriptors[DSA_BATCH_SIZE];
-    enum batch_task_status status;
+    buffer_zero_dsa_completion_fn completion_callback;
+    struct dsa_buffer_zero_completion_context completion_contexts[DSA_BATCH_SIZE];
+    enum dsa_task_status status;
+};
+
+typedef struct dsa_task_entry {
+    QSIMPLEQ_ENTRY(dsa_task_entry) entry;
+    enum dsa_task_type task_type;
+    union {
+        struct buffer_zero_task *task;
+        struct batch_buffer_zero_task *batch_task;
+    };
+} dsa_task_entry;
+
+typedef QSIMPLEQ_HEAD(dsa_task_queue, dsa_task_entry) dsa_task_queue;
+
+struct dsa_device {
+    bool running;
+    void *work_queue;
+    QemuMutex task_queue_lock;
+    QemuCond task_queue_cond;
+    dsa_task_queue task_queue;
+};
+
+struct dsa_completion_thread {
+    bool stopping;
+    bool running;
+    QemuThread thread;
+    int thread_id;
+    QemuSemaphore init_done_sem;
+    struct dsa_device *dsa_device_instance;
 };
 
 static uint64_t total_bytes_checked;
@@ -59,11 +110,136 @@ static uint64_t total_success_count;
 static int max_retry_count;
 static int top_retry_count;
 
-static void *dsa_wq = MAP_FAILED;
 static bool dedicated_mode;
 static int length_to_accel = 64;
 
 static buffer_accel_fn buffer_zero_fallback;
+
+static struct dsa_device dsa_device_instance;
+
+/**
+ * @brief Initializes a DSA device structure.
+ * 
+ * @param instance A pointer to the DSA device.
+ * @param work_queue  A pointer to the DSA work queue.
+ */
+static void
+dsa_device_init(struct dsa_device *instance,
+                void *dsa_work_queue)
+{
+    instance->running = true;
+    instance->work_queue = dsa_work_queue;
+    qemu_mutex_init(&instance->task_queue_lock);
+    qemu_cond_init(&instance->task_queue_cond);
+    QSIMPLEQ_INIT(&instance->task_queue);
+}
+
+/**
+ * @brief Stops a DSA device instance.
+ * 
+ * @param instance A pointer to the DSA device to stop.
+ */
+static void
+dsa_device_stop(struct dsa_device *instance)
+{
+    qemu_mutex_lock(&instance->task_queue_lock);
+    instance->running = false;
+    qemu_cond_signal(&instance->task_queue_cond);
+    qemu_mutex_unlock(&instance->task_queue_lock);
+}
+
+/**
+ * @brief Cleans up a DSA device structure.
+ * 
+ * @param instance A pointer to the DSA device to cleanup.
+ */
+static void
+dsa_device_cleanup(struct dsa_device *instance)
+{
+    if (instance->work_queue != MAP_FAILED) {
+        munmap(instance->work_queue, DSA_WQ_SIZE);
+    }
+}
+
+/**
+ * @brief Adds a task to the DSA task queue.
+ * 
+ * @param device_instance A pointer to the DSA device.
+ * @param type The DSA task type.
+ * @param context A pointer to the DSA task to enqueue.
+ *
+ * @return int Zero if successful, otherwise a proper error code.
+ */
+static int
+dsa_task_enqueue(struct dsa_device *device_instance,
+                 enum dsa_task_type type,
+                 void *context)
+{
+    dsa_task_queue *task_queue = &device_instance->task_queue;
+    QemuMutex *task_queue_lock = &device_instance->task_queue_lock;
+    QemuCond *task_queue_cond = &device_instance->task_queue_cond;
+
+    // TODO: Use pre-allocated lookaside buffer instead.
+    dsa_task_entry *task_entry = malloc(sizeof(dsa_task_entry));
+    bool notify = false;
+
+    task_entry->task_type = type;
+    if (type == DSA_TASK)
+        task_entry->task = context;
+    else {
+        assert(type == DSA_BATCH_TASK);
+        task_entry->batch_task = context;
+    }
+
+    qemu_mutex_lock(task_queue_lock);
+
+    // The queue is empty. This enqueue operation is a 0->1 transition.
+    if (QSIMPLEQ_EMPTY(task_queue))
+        notify = true;
+
+    QSIMPLEQ_INSERT_TAIL(task_queue, task_entry, entry);
+
+    // We need to notify the waiter for 0->1 transitions.
+    if (notify)
+        qemu_cond_signal(task_queue_cond);
+
+    qemu_mutex_unlock(task_queue_lock);
+
+    return 0;
+}
+
+/**
+ * @brief Takes a DSA task out of the task queue.
+ * 
+ * @param device_instance A pointer to the DSA device.
+ * @return dsa_task_entry* The DSA task being dequeued.
+ */
+static dsa_task_entry *
+dsa_task_dequeue(struct dsa_device *device_instance)
+{
+    dsa_task_entry *task_entry = NULL;
+    dsa_task_queue *task_queue = &device_instance->task_queue;
+    QemuMutex *task_queue_lock = &device_instance->task_queue_lock;
+    QemuCond *task_queue_cond = &device_instance->task_queue_cond;
+
+    qemu_mutex_lock(task_queue_lock);
+
+    while (true) {
+        if (!device_instance->running)
+            goto exit;
+        task_entry = QSIMPLEQ_FIRST(task_queue);
+        if (task_entry != NULL) {
+            break;
+        }
+        qemu_cond_wait(task_queue_cond, task_queue_lock);
+    }
+        
+    QSIMPLEQ_REMOVE_HEAD(task_queue, entry);
+
+exit:
+    qemu_mutex_unlock(task_queue_lock);
+    return task_entry;
+}
 
 /**
  * @brief This function opens a DSA device's work queue and
@@ -72,7 +248,8 @@ static buffer_accel_fn buffer_zero_fallback;
  * @param dsa_wq_path A pointer to the DSA device work queue's file path.
  * @return A pointer to the mapped memory.
  */
-static void *map_dsa_device(const char *dsa_wq_path)
+static void *
+map_dsa_device(const char *dsa_wq_path)
 {
     void *dsa_device;
     int fd;
@@ -100,17 +277,18 @@ static void *map_dsa_device(const char *dsa_wq_path)
  * @param descriptor A pointer to the DSA work item descriptor.
  * @return Zero if successful, non-zero otherwise.
  */
-static int submit_wi(void *wq, void *descriptor)
+static int
+submit_wi_int(void *wq, struct dsa_hw_desc *descriptor)
 {
     int retry = 0;
 
     _mm_sfence();
 
     if (dedicated_mode) {
-        _movdir64b(dsa_wq, descriptor);
+        _movdir64b(wq, descriptor);
     } else {
         while (true) {
-            if (_enqcmd(dsa_wq, descriptor) == 0) {
+            if (_enqcmd(wq, descriptor) == 0) {
                 break;
             }
             retry++;
@@ -125,14 +303,77 @@ static int submit_wi(void *wq, void *descriptor)
 }
 
 /**
+ * @brief Synchronously submits a DSA work item to the
+ *        device work queue.
+ * 
+ * @param wq A pointer to the DSA worjk queue's device memory.
+ * @param descriptor A pointer to the DSA work item descriptor.
+ * @return int Zero if successful, non-zero otherwise.
+ */
+static int
+submit_wi(void *wq, struct dsa_hw_desc *descriptor)
+{
+    return submit_wi_int(wq, descriptor);
+}
+
+/**
+ * @brief Asynchronously submits a DSA work item to the
+ *        device work queue.
+ * 
+ * @param device_instance A pointer to the DSA device instance.
+ * @param task A pointer to the buffer zero task.
+ * @return int Zero if successful, non-zero otherwise.
+ */
+static int
+submit_wi_async(struct dsa_device *device_instance,
+                struct buffer_zero_task *task)
+{
+    int ret;
+
+    task->status = DSA_TASK_PROCESSING;
+
+    ret = submit_wi_int(device_instance->work_queue,
+                        &task->descriptor);
+    if (ret != 0)
+        return ret;
+
+    return dsa_task_enqueue(device_instance, DSA_TASK, task);
+}
+
+/**
+ * @brief Asynchronously submits a DSA batch work item to the
+ *        device work queue.
+ * 
+ * @param device_instance A pointer to the DSA device instance.
+ * @param batch_task A pointer to the batch buffer zero task.
+ * @return int Zero if successful, non-zero otherwise.
+ */
+static int
+submit_batch_wi_async(struct dsa_device *device_instance,
+                      struct batch_buffer_zero_task *batch_task)
+{
+    int ret;
+
+    batch_task->status = DSA_TASK_PROCESSING;
+
+    ret = submit_wi_int(device_instance->work_queue,
+                        &batch_task->batch_descriptor);
+    if (ret != 0)
+        return ret;
+
+    return dsa_task_enqueue(device_instance, DSA_BATCH_TASK, batch_task);
+}
+
+/**
  * @brief Poll for the DSA work item completion.
  *
  * @param completion A pointer to the DSA work item completion record.
  * @param opcode The DSA opcode.
  * @return Zero if successful, non-zero otherwise.
  */
-static int poll_completion(struct dsa_completion_record *completion,
-                           enum dsa_opcode opcode)
+static int
+poll_completion(struct dsa_completion_record *completion,
+                enum dsa_opcode opcode)
 {
     int retry = 0;
 
@@ -165,12 +406,131 @@ static int poll_completion(struct dsa_completion_record *completion,
 }
 
 /**
+ * @brief Handles an asynchronous DSA task completion.
+ * 
+ * @param task A pointer to the buffer zero task structure.
+ */
+static void
+dsa_task_complete(struct buffer_zero_task *task)
+{
+    task->status = DSA_TASK_COMPLETION;
+    task->completion_callback(&task->completion_context);
+}
+
+/**
+ * @brief Handles an asynchronous DSA batch task completion.
+ * 
+ * @param task A pointer to the batch buffer zero task structure.
+ */
+static void
+dsa_batch_task_complete(struct batch_buffer_zero_task *batch_task)
+{
+    batch_task->status = DSA_TASK_COMPLETION;
+    for (int i = 0; i < batch_task->batch_descriptor.desc_count; i++)
+        batch_task->completion_callback(&batch_task->completion_contexts[i]);
+}
+
+/**
+ * @brief The function entry point called by a dedicated DSA
+ *        work item completion thread. 
+ * 
+ * @param opaque A pointer to the thread context.
+ * @return void* 
+ */
+static void *
+dsa_completion_loop(void *opaque)
+{
+    struct dsa_completion_thread *thread_context =
+        (struct dsa_completion_thread *)opaque;
+    dsa_task_entry *task_entry;
+    struct dsa_device *dsa_device_instance = thread_context->dsa_device_instance;
+
+    rcu_register_thread();
+
+    thread_context->thread_id = qemu_get_thread_id();
+    qemu_sem_post(&thread_context->init_done_sem);
+
+    while (thread_context->running) {
+        task_entry = dsa_task_dequeue(dsa_device_instance);
+        assert(task_entry != NULL || !dsa_device_instance->running);
+        if (!dsa_device_instance->running) {
+            assert(!thread_context->running);
+            break;
+        }
+        if (task_entry->task_type == DSA_TASK) {
+            poll_completion(&task_entry->task->completion,
+                            task_entry->task->descriptor.opcode);
+            dsa_task_complete(task_entry->task);
+        } else {
+            assert(task_entry->task_type == DSA_BATCH_TASK);
+            poll_completion(&task_entry->batch_task->batch_completion,
+                            task_entry->batch_task->batch_descriptor.opcode);
+            dsa_batch_task_complete(task_entry->batch_task);
+        }
+        // TODO: Use pre-allocated lookaside buffer instead.
+        free(task_entry);
+    }
+
+    rcu_unregister_thread();
+    return NULL;
+}
+
+/**
+ * @brief Initializes a DSA completion thread.
+ * 
+ * @param completion_thread A pointer to the completion thread context.
+ */
+__attribute__((unused))
+static void
+dsa_completion_thread_init(
+    struct dsa_completion_thread *completion_thread)
+{
+    completion_thread->stopping = false;
+    completion_thread->running = true;
+    completion_thread->dsa_device_instance = &dsa_device_instance;
+    completion_thread->thread_id = -1;
+    qemu_sem_init(&completion_thread->init_done_sem, 0);
+
+    qemu_thread_create(&completion_thread->thread,
+                       DSA_COMPLETION_THREAD,
+                       dsa_completion_loop,
+                       completion_thread,
+                       QEMU_THREAD_JOINABLE);
+
+    /* Wait for initialization to complete */
+    while (completion_thread->thread_id == -1) {
+        qemu_sem_wait(&completion_thread->init_done_sem);
+    }
+}
+
+/**
+ * @brief Stops the DSA completion thread.
+ * 
+ * @param opaque A pointer to the thread context.
+ */
+__attribute__((unused))
+static void
+dsa_completion_thread_stop(void *opaque)
+{
+    struct dsa_completion_thread *thread_context =
+        (struct dsa_completion_thread *)opaque;
+
+    thread_context->stopping = true;
+    thread_context->running = false;
+
+    dsa_device_stop(thread_context->dsa_device_instance);
+
+    qemu_thread_join(&thread_context->thread);    
+}
+
+/**
  * @brief Initializes a buffer zero batch task.
  *
  * @param task A pointer to the batch task to initialize.
  */
 __attribute__((unused))
-static void batch_buffer_zero_task_init(struct batch_buffer_zero_task *task)
+static void
+batch_buffer_zero_task_init(struct batch_buffer_zero_task *task)
 {
     task->batch_completion.status = DSA_COMP_NONE;
     task->batch_descriptor.completion_addr = (uint64_t)&task->batch_completion;
@@ -179,26 +539,26 @@ static void batch_buffer_zero_task_init(struct batch_buffer_zero_task *task)
     task->batch_descriptor.opcode = DSA_OPCODE_BATCH;
     task->batch_descriptor.flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
     task->batch_descriptor.desc_list_addr = (uintptr_t)task->descriptors;
-    task->status = BATCH_TASK_READY;
+    task->status = DSA_TASK_READY;
 }
 
 /**
  * @brief Initializes a buffer zero task.
  *
- * @param descriptor A pointer to the DSA task descriptor.
- * @param completion A pointer to the DSA task completion record.
+ * @param task A pointer to the buffer_zero_task structure.
+ * @param completion_callback The callback function for DSA completion.
  * @param buf A pointer to the memory buffer to check for zero.
  * @param len The length of the buffer.
  */
 static void
-buffer_zero_task_init(struct dsa_hw_desc *descriptor,
-                      struct dsa_completion_record *completion,
-                      const void *buf, size_t len)
+buffer_zero_task_init_int(struct dsa_hw_desc *descriptor,
+                          struct dsa_completion_record *completion,
+                          const void *buf, size_t len)
 {
     total_bytes_checked += len;
 
-    //memset(&completion, 0, sizeof(completion));
-    //memset(&descriptor, 0, sizeof(descriptor));
+    //memset(completion, 0, sizeof(dsa_completion_record));
+    //memset(descriptor, 0, sizeof(dsa_hw_desc));
 
     descriptor->opcode = DSA_OPCODE_COMPVAL;
     descriptor->flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
@@ -209,7 +569,51 @@ buffer_zero_task_init(struct dsa_hw_desc *descriptor,
     descriptor->completion_addr = (uint64_t)&completion;
 }
 
-static void page_in(const void *buf)
+/**
+ * @brief Initializes a buffer zero task.
+ * 
+ * @param task A pointer to the buffer zero task.
+ * @param completion_callback The DSA task completion callback function.
+ * @param buf A pointer to the memory buffer to check for zero.
+ * @param len The length of the memory buffer.
+ */
+static void
+buffer_zero_task_init(struct buffer_zero_task *task,
+                      buffer_zero_dsa_completion_fn completion_callback,
+                      const void *buf, size_t len)
+{
+    buffer_zero_task_init_int(&task->descriptor,
+                              &task->completion,
+                              buf, len);
+    task->status = DSA_TASK_READY;
+    task->completion_callback = completion_callback;
+}
+
+/**
+ * @brief Initializes a buffer zero task inside a batch task.
+ * 
+ * @param batch_task A pointer to the batch buffer zero task.
+ * @param index The index to the buffer zero task inside the batch.  
+ * @param buf The memory buffer to check for zero.
+ * @param len The length of the buffer.
+ */
+static void
+buffer_zero_task_in_batch_init(struct batch_buffer_zero_task *batch_task,
+                               int index, const void *buf, size_t len)
+{
+    buffer_zero_task_init_int(&batch_task->descriptors[index],
+                              &batch_task->completions[index],
+                              buf, len);
+}
+
+/**
+ * @brief Forces the OS to page-in the memory buffer by writing
+ *        to the first byte in the buffer.
+ * 
+ * @param buf The memory buffer to be paged in.
+ */
+static void
+page_in(const void *buf)
 {
     uint8_t test_byte;
 
@@ -233,22 +637,23 @@ static void page_in(const void *buf)
  * @param len Length of the memory buffer for comparison.
  * @return true if the memory buffer is all zero, false otherwise.
  */
-static bool buffer_zero_dsa(const void *buf, size_t len)
+static bool
+buffer_zero_dsa(const void *buf, size_t len)
 {
-    struct dsa_completion_record completion __attribute__((aligned(32)));
-    struct dsa_hw_desc descriptor;
+    struct buffer_zero_task task;
+    struct dsa_completion_record *completion = &task.completion;
 
-    buffer_zero_task_init(&descriptor, &completion, buf, len);
+    buffer_zero_task_init(&task, NULL, buf, len);
 
     total_function_calls++;
 
     page_in(buf);
 
-    submit_wi(dsa_wq, &descriptor);
-    poll_completion(&completion, DSA_OPCODE_COMPVAL);
+    submit_wi(dsa_device_instance.work_queue, &task.descriptor);
+    poll_completion(completion, task.descriptor.opcode);
 
-    if (completion.status == DSA_COMP_SUCCESS) {
-        return completion.result == 0;
+    if (completion->status == DSA_COMP_SUCCESS) {
+        return completion->result == 0;
     }
 
     /*
@@ -256,13 +661,40 @@ static bool buffer_zero_dsa(const void *buf, size_t len)
      * result. If we already know this is not a zero page, we can
      * return now.
      */
-    if (completion.bytes_completed != 0 && completion.result != 0) {
+    if (completion->bytes_completed != 0 && completion->result != 0) {
         return false;
     }
 
     /* Let's fallback to use CPU to complete it. */
-    return buffer_zero_fallback((uint8_t *)buf + completion.bytes_completed,
-                                len - completion.bytes_completed);
+    return buffer_zero_fallback((uint8_t *)buf + completion->bytes_completed,
+                                len - completion->bytes_completed);
+}
+
+/**
+ * @brief Asychronously perform a buffer zero DSA operation.
+ * 
+ * @param buf A pointer to the memory buffer.
+ * @param len The length of the memory buffer.
+ * @param completion_fn The DSA task completion callback function.
+ * @param completion_context The DSA task completion callback context.
+ * @return int Zero if successful, otherwise an appropriate error code.
+ */
+__attribute__((unused))
+static int
+buffer_zero_dsa_async(const void *buf, size_t len,
+                      buffer_zero_dsa_completion_fn completion_fn,
+                      void *completion_context)
+{
+    struct buffer_zero_task *task = 
+        aligned_alloc(32, sizeof(struct buffer_zero_task));
+
+    buffer_zero_task_init(task, completion_fn, buf, len);
+
+    total_function_calls++;
+
+    page_in(buf);
+
+    return submit_wi_async(dsa_device_instance.work_queue, task);
 }
 
 /**
@@ -281,15 +713,13 @@ buffer_zero_dsa_batch_add_task(struct batch_buffer_zero_task *batch_task,
 {
     int desc_count;
 
-    assert(batch_task->status == BATCH_TASK_READY);
+    assert(batch_task->status == DSA_TASK_READY);
 
     if (batch_task->batch_descriptor.desc_count >= DSA_BATCH_SIZE)
         return false;
 
     desc_count = batch_task->batch_descriptor.desc_count;
-    buffer_zero_task_init(&batch_task->descriptors[desc_count],
-                          &batch_task->completions[desc_count],
-                          buf, len);
+    buffer_zero_task_in_batch_init(batch_task, desc_count, buf, len);
 
     batch_task->batch_descriptor.desc_count++;
 
@@ -303,23 +733,17 @@ buffer_zero_dsa_batch_add_task(struct batch_buffer_zero_task *batch_task,
  * @param batch_task The batch task to be submitted to DSA device.
  */
 __attribute__((unused))
-static void buffer_zero_dsa_batch(struct batch_buffer_zero_task *batch_task)
+static int
+buffer_zero_dsa_batch_async(struct batch_buffer_zero_task *batch_task)
 {
     assert(batch_task->batch_descriptor.desc_count <= DSA_BATCH_SIZE);
-    assert(batch_task->status == BATCH_TASK_READY);
+    assert(batch_task->status == DSA_TASK_READY);
 
     for (int i = 0; i < batch_task->batch_descriptor.desc_count; i++) {
         page_in((void*)batch_task->descriptors[i].src_addr);
     }
 
-    batch_task->status = BATCH_TASK_PROCESSING;
-
-    submit_wi(dsa_wq, &batch_task->batch_descriptor);
-    poll_completion(&batch_task->batch_completion, DSA_OPCODE_BATCH);
-
-    //TODO: Poll completion on all individual tasks in the batch.
-
-    batch_task->status = BATCH_TASK_COMPLETION;
+    return submit_batch_wi_async(&dsa_device_instance, batch_task);
 }
 
 /**
@@ -332,6 +756,7 @@ static void buffer_zero_dsa_batch(struct batch_buffer_zero_task *batch_task)
  */
 int configure_dsa(const char *dsa_path)
 {
+    void *dsa_wq = MAP_FAILED;
     dedicated_mode = false;
     max_retry_count = 3000;
     total_bytes_checked = 0;
@@ -348,6 +773,8 @@ int configure_dsa(const char *dsa_path)
     set_accel(buffer_zero_dsa, length_to_accel);
     get_fallback_accel(&buffer_zero_fallback);
 
+    dsa_device_init(&dsa_device_instance, dsa_wq);
+
     return 0;
 }
 
@@ -358,9 +785,7 @@ int configure_dsa(const char *dsa_path)
  */
 void dsa_cleanup(void)
 {
-    if (dsa_wq != MAP_FAILED) {
-        munmap(dsa_wq, DSA_WQ_SIZE);
-    }
+    dsa_device_cleanup(&dsa_device_instance);
 }
 
 #else
