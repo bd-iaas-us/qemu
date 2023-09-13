@@ -677,6 +677,42 @@ int multifd_send_sync_main(QEMUFile *f)
     return 0;
 }
 
+static QemuMutex zero_page_lock;
+static uint32_t zero_page_index;
+static uint32_t zero_page_counter;
+
+/**
+ * @brief Multifd zero page test hook.
+ * 
+ * @param multifd_zero_page_ratio The value is between 0 to 100. If the value
+ * is 10, it means 10% of the pages are zero page.
+ * @return true if we want to make the current page a zero page. 
+ * @return false if we want to make the current page a normal page.
+ */
+static bool multifd_zero_page_test_hook(uint8_t multifd_zero_page_ratio)
+{
+    bool is_zero_page;
+
+    qemu_mutex_lock(&zero_page_lock);
+
+    if (zero_page_counter < multifd_zero_page_ratio) {
+        is_zero_page = true;
+    } else {
+        is_zero_page = false;
+    }
+    zero_page_index++;
+    zero_page_counter++;
+
+    if (zero_page_index >= 100) {
+        zero_page_index = 0;
+        zero_page_counter = 0;
+    }
+
+    qemu_mutex_unlock(&zero_page_lock);
+
+    return is_zero_page;
+}
+
 static void *multifd_send_thread(void *opaque)
 {
     MultiFDSendParams *p = opaque;
@@ -686,6 +722,7 @@ static void *multifd_send_thread(void *opaque)
     bool use_multifd_zero_page = !migrate_use_main_zero_page();
     int ret = 0;
     bool use_zero_copy_send = migrate_zero_copy_send();
+    uint8_t multifd_zero_page_ratio = migrate_multifd_zero_page_ratio();
 
     uint64_t start;
     uint64_t end;
@@ -739,7 +776,11 @@ static void *multifd_send_thread(void *opaque)
                     start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
                     start_cycles = __rdtsc();
                     zero_page = buffer_is_zero(rb->host + offset, p->page_size);
-                    zero_page = false;
+                    if (multifd_zero_page_ratio <= 100) {
+                        if (!multifd_zero_page_test_hook(multifd_zero_page_ratio)) {
+                            zero_page = false;
+                        }
+                    }
                     end = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
                     end_cycles = __rdtsc();
 
@@ -998,6 +1039,8 @@ int multifd_save_setup(Error **errp)
     if (!migrate_multifd()) {
         return 0;
     }
+
+    qemu_mutex_init(&zero_page_lock);
 
     thread_count = migrate_multifd_channels();
     multifd_send_state = g_malloc0(sizeof(*multifd_send_state));

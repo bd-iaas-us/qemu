@@ -66,6 +66,14 @@
 #     between 0 and @dirty-sync-count * @multifd-channels.  (since
 #     7.1)
 #
+# @check-zero-page-latency: Number of milliseconds spent in zero page checking (since 8.0)
+#
+# @check-zero-page-cycles: Number of cycles spent in zero page checking (since 8.0)
+#
+# @channel-send-latency: Number of milliseconds spent in network send (since 8.0)
+#
+# @channel-send-cycles: Number of cycles spent in network send (since 8.0)
+#
 # Since: 0.14
 ##
 { 'struct': 'MigrationStats',
@@ -78,7 +86,11 @@
            'multifd-bytes' : 'uint64', 'pages-per-second' : 'uint64',
            'precopy-bytes' : 'uint64', 'downtime-bytes' : 'uint64',
            'postcopy-bytes' : 'uint64',
-           'dirty-sync-missed-zero-copy' : 'uint64' } }
+           'dirty-sync-missed-zero-copy' : 'uint64',
+           'check-zero-page-latency' : 'uint64',
+           'check-zero-page-cycles' : 'uint64',
+           'channel-send-latency' : 'uint64',
+           'channel-send-cycles' : 'uint64' } }
 
 ##
 # @XBZRLECacheStats:
@@ -800,6 +812,8 @@
 #     Nodes are mapped to their block device name if there is one, and
 #     to their node name otherwise.  (Since 5.2)
 #
+# @multifd-zero-page-ratio: Test hook setting the zero page ratio.
+#
 # Features:
 #
 # @unstable: Member @x-checkpoint-delay is experimental.
@@ -821,7 +835,7 @@
            'xbzrle-cache-size', 'max-postcopy-bandwidth',
            'max-cpu-throttle', 'multifd-compression',
            'multifd-zlib-level' ,'multifd-zstd-level',
-           'block-bitmap-mapping' ] }
+           'block-bitmap-mapping', 'multifd-zero-page-ratio' ] }
 
 ##
 # @MigrateSetParameters:
@@ -956,6 +970,8 @@
 #     Nodes are mapped to their block device name if there is one, and
 #     to their node name otherwise.  (Since 5.2)
 #
+# @multifd-zero-page-ratio: Test hook setting the zero page ratio.
+#
 # Features:
 #
 # @unstable: Member @x-checkpoint-delay is experimental.
@@ -993,7 +1009,8 @@
             '*multifd-compression': 'MultiFDCompression',
             '*multifd-zlib-level': 'uint8',
             '*multifd-zstd-level': 'uint8',
-            '*block-bitmap-mapping': [ 'BitmapMigrationNodeAlias' ] } }
+            '*block-bitmap-mapping': [ 'BitmapMigrationNodeAlias' ],
+            '*multifd-zero-page-ratio': 'uint8' } }
 
 ##
 # @migrate-set-parameters:
@@ -1148,6 +1165,8 @@
 #     Nodes are mapped to their block device name if there is one, and
 #     to their node name otherwise.  (Since 5.2)
 #
+# @multifd-zero-page-ratio: Test hook setting the zero page ratio.
+#
 # Features:
 #
 # @unstable: Member @x-checkpoint-delay is experimental.
@@ -1182,7 +1201,8 @@
             '*multifd-compression': 'MultiFDCompression',
             '*multifd-zlib-level': 'uint8',
             '*multifd-zstd-level': 'uint8',
-            '*block-bitmap-mapping': [ 'BitmapMigrationNodeAlias' ] } }
+            '*block-bitmap-mapping': [ 'BitmapMigrationNodeAlias' ],
+            '*multifd-zero-page-ratio': 'uint8' } }
 
 ##
 # @query-migrate-parameters:

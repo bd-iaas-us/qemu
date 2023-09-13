@@ -77,6 +77,11 @@
 #define DEFAULT_MIGRATE_ANNOUNCE_ROUNDS    5
 #define DEFAULT_MIGRATE_ANNOUNCE_STEP    100
 
+/*
+ * Parameter for multifd zero page test hook.
+ */
+#define DEFAULT_MIGRATE_MULTIFD_ZERO_PAGE_RATIO 101
+
 #define DEFINE_PROP_MIG_CAP(name, x)             \
     DEFINE_PROP_BOOL(name, MigrationState, capabilities[x], false)
 
@@ -163,6 +168,9 @@ Property migration_properties[] = {
     DEFINE_PROP_STRING("tls-creds", MigrationState, parameters.tls_creds),
     DEFINE_PROP_STRING("tls-hostname", MigrationState, parameters.tls_hostname),
     DEFINE_PROP_STRING("tls-authz", MigrationState, parameters.tls_authz),
+    DEFINE_PROP_UINT8("multifd-zero-page-ratio", MigrationState,
+                      parameters.multifd_zero_page_ratio,
+                      DEFAULT_MIGRATE_MULTIFD_ZERO_PAGE_RATIO),
 
     /* Migration capabilities */
     DEFINE_PROP_MIG_CAP("x-xbzrle", MIGRATION_CAPABILITY_XBZRLE),
@@ -818,6 +826,12 @@ uint64_t migrate_xbzrle_cache_size(void)
     return s->parameters.xbzrle_cache_size;
 }
 
+uint8_t migrate_multifd_zero_page_ratio(void)
+{
+    MigrationState *s = migrate_get_current();
+    return s->parameters.multifd_zero_page_ratio;
+}
+
 /* parameter setters */
 
 void migrate_set_block_incremental(bool value)
@@ -919,6 +933,9 @@ MigrationParameters *qmp_query_migrate_parameters(Error **errp)
             QAPI_CLONE(BitmapMigrationNodeAliasList,
                        s->parameters.block_bitmap_mapping);
     }
+
+    //params->has_multifd_zero_page_ratio = true;
+    //params->multifd_zero_page_ratio = s->parameters.multifd_zero_page_ratio;
 
     return params;
 }
@@ -1110,6 +1127,14 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
                    "Zero copy only available for non-compressed non-TLS multifd migration");
         return false;
     }
+
+    if (params->has_multifd_zero_page_ratio &&
+        params->multifd_zero_page_ratio > 100) {
+        error_setg(errp, QERR_INVALID_PARAMETER_VALUE,
+                   "multifd_zero_page_ratio",
+                   "a value between 0 and 100");
+        return false;
+    }
 #endif
 
     return true;
@@ -1210,6 +1235,11 @@ static void migrate_params_test_apply(MigrateSetParameters *params,
     if (params->has_block_bitmap_mapping) {
         dest->has_block_bitmap_mapping = true;
         dest->block_bitmap_mapping = params->block_bitmap_mapping;
+    }
+
+    if (params->has_multifd_zero_page_ratio) {
+        dest->has_multifd_zero_page_ratio = true;
+        dest->multifd_zero_page_ratio = params->multifd_zero_page_ratio;
     }
 }
 
@@ -1328,6 +1358,10 @@ static void migrate_params_apply(MigrateSetParameters *params, Error **errp)
         s->parameters.block_bitmap_mapping =
             QAPI_CLONE(BitmapMigrationNodeAliasList,
                        params->block_bitmap_mapping);
+    }
+
+    if (params->has_multifd_zero_page_ratio) {
+        s->parameters.multifd_zero_page_ratio = params->multifd_zero_page_ratio;
     }
 }
 

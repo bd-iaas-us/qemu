@@ -79,14 +79,6 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
 
         monitor_printf(mon, "total time: %" PRIu64 " ms\n",
                        info->total_time);
-        monitor_printf(mon, "multifd zero page time: %" PRIu64 " ms\n",
-                       info->ram->check_zero_page_latency);
-        monitor_printf(mon, "check zero page cycles: %" PRIu64 " cycles\n",
-                       info->ram->check_zero_page_cycles);
-        monitor_printf(mon, "channel send latency: %" PRIu64 " ms\n",
-                       info->ram->channel_send_latency);
-        monitor_printf(mon, "channel send cycles: %" PRIu64 " cycles\n",
-                       info->ram->channel_send_cycles);
         if (info->has_expected_downtime) {
             monitor_printf(mon, "expected downtime: %" PRIu64 " ms\n",
                            info->expected_downtime);
@@ -102,6 +94,14 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
     }
 
     if (info->ram) {
+        monitor_printf(mon, "multifd zero page time: %" PRIu64 " ms\n",
+                       info->ram->check_zero_page_latency);
+        monitor_printf(mon, "check zero page cycles: %" PRIu64 " cycles\n",
+                       info->ram->check_zero_page_cycles);
+        monitor_printf(mon, "channel send latency: %" PRIu64 " ms\n",
+                       info->ram->channel_send_latency);
+        monitor_printf(mon, "channel send cycles: %" PRIu64 " cycles\n",
+                       info->ram->channel_send_cycles);
         monitor_printf(mon, "transferred ram: %" PRIu64 " kbytes\n",
                        info->ram->transferred >> 10);
         monitor_printf(mon, "throughput: %0.2f mbps\n",
@@ -376,6 +376,11 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
                 }
             }
         }
+
+        assert(params->has_multifd_zero_page_ratio);
+        monitor_printf(mon, "%s: %u\n",
+            MigrationParameter_str(MIGRATION_PARAMETER_MULTIFD_ZERO_PAGE_RATIO),
+            params->multifd_zero_page_ratio);
     }
 
     qapi_free_MigrationParameters(params);
@@ -631,6 +636,10 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
     case MIGRATION_PARAMETER_BLOCK_BITMAP_MAPPING:
         error_setg(&err, "The block-bitmap-mapping parameter can only be set "
                    "through QMP");
+        break;
+    case MIGRATION_PARAMETER_MULTIFD_ZERO_PAGE_RATIO:
+        p->has_multifd_zero_page_ratio = true;
+        visit_type_uint8(v, param, &p->multifd_zero_page_ratio, &err);
         break;
     default:
         assert(0);
