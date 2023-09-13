@@ -13,6 +13,8 @@
 #include "qemu/osdep.h"
 #include "qemu/rcu.h"
 #include "qemu/cutils.h"
+#include "qemu/dsa.h"
+#include "qemu/memalign.h"
 #include "exec/target_page.h"
 #include "sysemu/sysemu.h"
 #include "exec/ramblock.h"
@@ -573,6 +575,14 @@ void multifd_save_cleanup(void)
         p->name = NULL;
         multifd_pages_clear(p->pages);
         p->pages = NULL;
+        g_free(p->addr);
+        p->addr = NULL;
+        g_free(p->zero_page_results);
+        p->zero_page_results = NULL;
+        qemu_vfree(p->dsa_task);
+        p->dsa_task = NULL;
+        qemu_vfree(p->dsa_batch_task);
+        p->dsa_batch_task = NULL;
         p->packet_len = 0;
         g_free(p->packet);
         p->packet = NULL;
@@ -713,6 +723,72 @@ static bool multifd_zero_page_test_hook(uint8_t multifd_zero_page_ratio)
     return is_zero_page;
 }
 
+static void multifd_zero_page_check(MultiFDSendParams *p,
+                                    uint8_t multifd_zero_page_ratio)
+{
+    assert(!migrate_use_main_zero_page());
+    assert(!migrate_multifd_dsa_accel());
+
+    RAMBlock *rb = p->pages->block;
+
+    for (int i = 0; i < p->pages->num; i++) {
+        uint64_t offset = p->pages->offset[i];
+        bool zero_page = false;
+        zero_page = buffer_is_zero(rb->host + offset, p->page_size);
+        if (multifd_zero_page_ratio <= 100) {
+            if (!multifd_zero_page_test_hook(multifd_zero_page_ratio)) {
+                zero_page = false;
+            }
+        }
+
+        if (zero_page) {
+            p->zero[p->zero_num] = offset;
+            p->zero_num++;
+            ram_release_page(rb->idstr, offset);
+        } else {
+            p->normal[p->normal_num] = offset;
+            p->normal_num++;
+        }
+    }
+}
+
+static void multifd_zero_page_check_batch(MultiFDSendParams *p,
+                                          uint8_t multifd_zero_page_ratio)
+{
+    assert(!migrate_use_main_zero_page());
+    assert(migrate_multifd_dsa_accel());
+
+    RAMBlock *rb = p->pages->block;
+
+    for (int i = 0; i < p->pages->num; i++) {
+        p->addr[i] = (ram_addr_t)(rb->host + p->pages->offset[i]);
+    }
+
+    buffer_is_zero_dsa_batch(p->dsa_batch_task,
+                             (const void **)p->addr,
+                             p->pages->num,
+                             p->page_size,
+                             p->zero_page_results);
+    for (int i = 0; i < p->pages->num; i++) {
+        if (multifd_zero_page_ratio <= 100) {
+            if (!multifd_zero_page_test_hook(multifd_zero_page_ratio)) {
+                p->zero_page_results[i] = false;
+            }
+        }
+    }
+
+    for (int i = 0; i < p->pages->num; i++) {
+        uint64_t offset = p->pages->offset[i];
+        if (p->zero_page_results[i]) {
+            p->zero[p->zero_num] = offset;
+            p->zero_num++;
+        } else {
+            p->normal[p->normal_num] = offset;
+            p->normal_num++;
+        }
+    }
+}
+
 static void *multifd_send_thread(void *opaque)
 {
     MultiFDSendParams *p = opaque;
@@ -720,6 +796,7 @@ static void *multifd_send_thread(void *opaque)
     Error *local_err = NULL;
     /* older qemu don't understand zero page on multifd channel */
     bool use_multifd_zero_page = !migrate_use_main_zero_page();
+    bool use_multifd_dsa_accel = migrate_multifd_dsa_accel();
     int ret = 0;
     bool use_zero_copy_send = migrate_zero_copy_send();
     uint8_t multifd_zero_page_ratio = migrate_multifd_zero_page_ratio();
@@ -751,8 +828,6 @@ static void *multifd_send_thread(void *opaque)
         qemu_mutex_lock(&p->mutex);
 
         if (p->pending_job) {
-            RAMBlock *rb = p->pages->block;
-            uint64_t packet_num = p->packet_num;
             p->flags = 0;
             if (p->sync_needed) {
                 p->flags |= MULTIFD_FLAG_SYNC;
@@ -769,35 +844,20 @@ static void *multifd_send_thread(void *opaque)
                 p->iovs_num = 1;
             }
 
-            for (int i = 0; i < p->pages->num; i++) {
-                uint64_t offset = p->pages->offset[i];
-                bool zero_page = false;
-                if (use_multifd_zero_page) {
-                    start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-                    start_cycles = __rdtsc();
-                    zero_page = buffer_is_zero(rb->host + offset, p->page_size);
-                    if (multifd_zero_page_ratio <= 100) {
-                        if (!multifd_zero_page_test_hook(multifd_zero_page_ratio)) {
-                            zero_page = false;
-                        }
-                    }
-                    end = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-                    end_cycles = __rdtsc();
-
-                    stat64_add(&mig_stats.check_zero_page_latency,
-                               end - start);
-                    stat64_add(&mig_stats.check_zero_page_cycles,
-                               end_cycles - start_cycles);
-                }
-                if (zero_page) {
-                    p->zero[p->zero_num] = offset;
-                    p->zero_num++;
-                    ram_release_page(rb->idstr, offset);
-                } else {
-                    p->normal[p->normal_num] = offset;
-                    p->normal_num++;
-                }
+            start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            start_cycles = __rdtsc();
+            if (!use_multifd_zero_page || !use_multifd_dsa_accel) {
+                multifd_zero_page_check(p, multifd_zero_page_ratio);
+            } else {
+                multifd_zero_page_check_batch(p, multifd_zero_page_ratio);
             }
+            end = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            end_cycles = __rdtsc();
+
+            stat64_add(&mig_stats.check_zero_page_latency,
+                       end - start);
+            stat64_add(&mig_stats.check_zero_page_cycles,
+                       end_cycles - start_cycles);
 
             if (p->normal_num) {
                 ret = multifd_send_state->ops->send_prepare(p, &local_err);
@@ -807,7 +867,7 @@ static void *multifd_send_thread(void *opaque)
             }
             multifd_send_fill_packet(p);
 
-            trace_multifd_send(p->id, packet_num, p->normal_num, p->zero_num, p->flags,
+            trace_multifd_send(p->id, p->packet_num, p->normal_num, p->zero_num, p->flags,
                                p->next_packet_size);
 
             if (use_zero_copy_send) {
@@ -1060,6 +1120,14 @@ int multifd_save_setup(Error **errp)
         p->pending_job = 0;
         p->id = i;
         p->pages = multifd_pages_init(page_count);
+        p->addr = g_new0(ram_addr_t, page_count);
+        p->zero_page_results = g_new0(bool, page_count);
+        p->dsa_task = 
+            (struct buffer_zero_task *)qemu_memalign(32, sizeof(*p->dsa_task));
+        buffer_zero_task_init(p->dsa_task);
+        p->dsa_batch_task = 
+            (struct buffer_zero_batch_task *)qemu_memalign(32, sizeof(*p->dsa_batch_task));
+        buffer_zero_batch_task_init(p->dsa_batch_task);
         p->packet_len = sizeof(MultiFDPacket_t)
                       + sizeof(uint64_t) * page_count;
         p->packet = g_malloc0(p->packet_len);

@@ -26,6 +26,7 @@
 #include "qemu/queue.h"
 #include "qemu/lockable.h"
 #include "qemu/cutils.h"
+#include "qemu/dsa.h"
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "qemu/rcu.h"
@@ -40,40 +41,11 @@
 #include "x86intrin.h"
 
 #define DSA_WQ_SIZE 4096
-#define DSA_BATCH_SIZE 64
 #define DSA_COMPLETION_THREAD "dsa_completion_thread"
-
-enum dsa_task_status {
-    DSA_TASK_READY = 0,
-    DSA_TASK_PROCESSING,
-    DSA_TASK_COMPLETION
-};
 
 enum dsa_task_type {
     DSA_TASK = 0,
     DSA_BATCH_TASK
-};
-
-struct dsa_buffer_zero_completion_context {
-    //TODO: Add context structure to feed the callback fn.
-};
-
-struct buffer_zero_task {
-    struct dsa_completion_record completion __attribute__((aligned(32)));
-    struct dsa_hw_desc descriptor;
-    buffer_zero_dsa_completion_fn completion_callback;
-    struct dsa_buffer_zero_completion_context completion_context;
-    enum dsa_task_status status;
-};
-
-struct batch_buffer_zero_task {
-    struct dsa_completion_record batch_completion __attribute__((aligned(32)));
-    struct dsa_completion_record completions[DSA_BATCH_SIZE] __attribute__((aligned(32)));
-    struct dsa_hw_desc batch_descriptor;
-    struct dsa_hw_desc descriptors[DSA_BATCH_SIZE];
-    buffer_zero_dsa_completion_fn completion_callback;
-    struct dsa_buffer_zero_completion_context completion_contexts[DSA_BATCH_SIZE];
-    enum dsa_task_status status;
 };
 
 typedef struct dsa_task_entry {
@@ -81,7 +53,7 @@ typedef struct dsa_task_entry {
     enum dsa_task_type task_type;
     union {
         struct buffer_zero_task *task;
-        struct batch_buffer_zero_task *batch_task;
+        struct buffer_zero_batch_task *batch_task;
     };
 } dsa_task_entry;
 
@@ -350,7 +322,7 @@ submit_wi_async(struct dsa_device *device_instance,
  */
 static int
 submit_batch_wi_async(struct dsa_device *device_instance,
-                      struct batch_buffer_zero_task *batch_task)
+                      struct buffer_zero_batch_task *batch_task)
 {
     int ret;
 
@@ -381,12 +353,15 @@ poll_completion(struct dsa_completion_record *completion,
         if (completion->status != DSA_COMP_NONE) {
             /* TODO: Error handling here. */
             if (completion->status != DSA_COMP_SUCCESS &&
-                completion->status != DSA_COMP_PAGE_FAULT_NOBOF) {
+                completion->status != DSA_COMP_PAGE_FAULT_NOBOF &&
+                completion->status != DSA_COMP_BATCH_FAIL &&
+	            completion->status != DSA_COMP_BATCH_PAGE_FAULT) {
                 fprintf(stderr, "DSA opcode %d failed with status = %d.\n",
                     opcode, completion->status);
                 exit(1);
             } else {
                 total_success_count++;
+                //fprintf(stderr, "poll_completion retried %d times.\n", retry);
             }
             break;
         }
@@ -423,7 +398,7 @@ dsa_task_complete(struct buffer_zero_task *task)
  * @param task A pointer to the batch buffer zero task structure.
  */
 static void
-dsa_batch_task_complete(struct batch_buffer_zero_task *batch_task)
+dsa_batch_task_complete(struct buffer_zero_batch_task *batch_task)
 {
     batch_task->status = DSA_TASK_COMPLETION;
     for (int i = 0; i < batch_task->batch_descriptor.desc_count; i++)
@@ -524,25 +499,6 @@ dsa_completion_thread_stop(void *opaque)
 }
 
 /**
- * @brief Initializes a buffer zero batch task.
- *
- * @param task A pointer to the batch task to initialize.
- */
-__attribute__((unused))
-static void
-batch_buffer_zero_task_init(struct batch_buffer_zero_task *task)
-{
-    task->batch_completion.status = DSA_COMP_NONE;
-    task->batch_descriptor.completion_addr = (uint64_t)&task->batch_completion;
-    // TODO: Ensure that we never send a batch with count <= 1
-    task->batch_descriptor.desc_count = 0;
-    task->batch_descriptor.opcode = DSA_OPCODE_BATCH;
-    task->batch_descriptor.flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
-    task->batch_descriptor.desc_list_addr = (uintptr_t)task->descriptors;
-    task->status = DSA_TASK_READY;
-}
-
-/**
  * @brief Initializes a buffer zero task.
  *
  * @param task A pointer to the buffer_zero_task structure.
@@ -552,21 +508,12 @@ batch_buffer_zero_task_init(struct batch_buffer_zero_task *task)
  */
 static void
 buffer_zero_task_init_int(struct dsa_hw_desc *descriptor,
-                          struct dsa_completion_record *completion,
-                          const void *buf, size_t len)
+                          struct dsa_completion_record *completion)
 {
-    total_bytes_checked += len;
-
-    //memset(completion, 0, sizeof(dsa_completion_record));
-    //memset(descriptor, 0, sizeof(dsa_hw_desc));
-
     descriptor->opcode = DSA_OPCODE_COMPVAL;
     descriptor->flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
-    descriptor->xfer_size = len;
-    descriptor->src_addr = (uintptr_t)buf;
     descriptor->comp_pattern = (uint64_t)0;
-    completion->status = 0;
-    descriptor->completion_addr = (uint64_t)&completion;
+    descriptor->completion_addr = (uint64_t)completion;
 }
 
 /**
@@ -577,16 +524,61 @@ buffer_zero_task_init_int(struct dsa_hw_desc *descriptor,
  * @param buf A pointer to the memory buffer to check for zero.
  * @param len The length of the memory buffer.
  */
-static void
-buffer_zero_task_init(struct buffer_zero_task *task,
-                      buffer_zero_dsa_completion_fn completion_callback,
-                      const void *buf, size_t len)
+void
+buffer_zero_task_init(struct buffer_zero_task *task)
 {
+    memset(task, 0, sizeof(*task));
+
     buffer_zero_task_init_int(&task->descriptor,
-                              &task->completion,
-                              buf, len);
+                              &task->completion);
+}
+
+/**
+ * @brief Initializes a buffer zero batch task.
+ *
+ * @param task A pointer to the batch task to initialize.
+ */
+void
+buffer_zero_batch_task_init(struct buffer_zero_batch_task *task)
+{
+    memset(task, 0, sizeof(*task));
+
+    task->batch_completion.status = DSA_COMP_NONE;
+    task->batch_descriptor.completion_addr = (uint64_t)&task->batch_completion;
+    // TODO: Ensure that we never send a batch with count <= 1
+    task->batch_descriptor.desc_count = 0;
+    task->batch_descriptor.opcode = DSA_OPCODE_BATCH;
+    task->batch_descriptor.flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV;
+    task->batch_descriptor.desc_list_addr = (uintptr_t)task->descriptors;
     task->status = DSA_TASK_READY;
-    task->completion_callback = completion_callback;
+
+    for (int i = 0; i < DSA_BATCH_SIZE; i++) {
+        buffer_zero_task_init_int(&task->descriptors[i],
+                                  &task->completions[i]);
+    }
+}
+
+static void
+buffer_zero_task_set_int(struct dsa_hw_desc *descriptor,
+                         const void *buf,
+                         size_t len)
+{
+    struct dsa_completion_record *completion = 
+        (struct dsa_completion_record *)descriptor->completion_addr;
+
+    total_bytes_checked += len;
+
+    descriptor->xfer_size = len;
+    descriptor->src_addr = (uintptr_t)buf;
+    completion->status = 0;
+}
+
+static void
+buffer_zero_task_set(struct buffer_zero_task *task,
+                     const void *buf,
+                     size_t len)
+{
+    buffer_zero_task_set_int(&task->descriptor, buf, len);
 }
 
 /**
@@ -598,12 +590,24 @@ buffer_zero_task_init(struct buffer_zero_task *task,
  * @param len The length of the buffer.
  */
 static void
-buffer_zero_task_in_batch_init(struct batch_buffer_zero_task *batch_task,
-                               int index, const void *buf, size_t len)
+buffer_zero_task_in_batch_set(struct buffer_zero_batch_task *batch_task,
+                              int index, const void *buf, size_t len)
 {
-    buffer_zero_task_init_int(&batch_task->descriptors[index],
-                              &batch_task->completions[index],
-                              buf, len);
+    buffer_zero_task_set_int(&batch_task->descriptors[index],
+                             buf, len);
+}
+
+static void
+buffer_zero_batch_task_set(struct buffer_zero_batch_task *batch_task,
+                           const void **buf, size_t count, size_t len)
+{
+    assert(count > 1);
+    assert(count <= DSA_BATCH_SIZE);
+
+    for (int i = 0; i < count; i++) {
+        buffer_zero_task_set_int(&batch_task->descriptors[i], buf[i], len);
+    }
+    batch_task->batch_descriptor.desc_count = count;
 }
 
 /**
@@ -643,7 +647,8 @@ buffer_zero_dsa(const void *buf, size_t len)
     struct buffer_zero_task task;
     struct dsa_completion_record *completion = &task.completion;
 
-    buffer_zero_task_init(&task, NULL, buf, len);
+    buffer_zero_task_init(&task);
+    buffer_zero_task_set(&task, buf, len);
 
     total_function_calls++;
 
@@ -670,6 +675,51 @@ buffer_zero_dsa(const void *buf, size_t len)
                                 len - completion->bytes_completed);
 }
 
+static void
+buffer_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
+                      const void **buf, size_t count, size_t len, 
+                      bool *result)
+{
+    struct dsa_completion_record *completion;
+
+    assert(count <= DSA_BATCH_SIZE);
+
+    buffer_zero_batch_task_set(batch_task, buf, count, len);
+
+    total_function_calls++;
+
+    //for (int i = 0; i < count; i++) {
+    //    page_in(buf[i]);
+    //}
+
+    submit_wi(dsa_device_instance.work_queue, &batch_task->batch_descriptor);
+    poll_completion(&batch_task->batch_completion, batch_task->batch_descriptor.opcode);
+
+    for (int i = 0; i < count; i++) {
+
+        completion = &batch_task->completions[i];
+
+        if (completion->status == DSA_COMP_SUCCESS) {
+            result[i] = (completion->result == 0);
+            continue;
+        }
+
+        /*
+        * DSA was able to partially complete the operation. Check the
+        * result. If we already know this is not a zero page, we can
+        * return now.
+        */
+        if (completion->bytes_completed != 0 && completion->result != 0) {
+            result[i] = false;
+            continue;
+        }
+
+        /* Let's fallback to use CPU to complete it. */
+        result[i] = buffer_zero_fallback((uint8_t *)buf[i] + completion->bytes_completed,
+                                         len - completion->bytes_completed);
+    }
+}
+
 /**
  * @brief Asychronously perform a buffer zero DSA operation.
  * 
@@ -688,7 +738,8 @@ buffer_zero_dsa_async(const void *buf, size_t len,
     struct buffer_zero_task *task = 
         aligned_alloc(32, sizeof(struct buffer_zero_task));
 
-    buffer_zero_task_init(task, completion_fn, buf, len);
+    buffer_zero_task_init(task);
+    buffer_zero_task_set(task, buf, len);
 
     total_function_calls++;
 
@@ -708,7 +759,7 @@ buffer_zero_dsa_async(const void *buf, size_t len,
  */
 __attribute__((unused))
 static bool
-buffer_zero_dsa_batch_add_task(struct batch_buffer_zero_task *batch_task,
+buffer_zero_dsa_batch_add_task(struct buffer_zero_batch_task *batch_task,
                                const void *buf, size_t len)
 {
     int desc_count;
@@ -719,7 +770,7 @@ buffer_zero_dsa_batch_add_task(struct batch_buffer_zero_task *batch_task,
         return false;
 
     desc_count = batch_task->batch_descriptor.desc_count;
-    buffer_zero_task_in_batch_init(batch_task, desc_count, buf, len);
+    buffer_zero_task_in_batch_set(batch_task, desc_count, buf, len);
 
     batch_task->batch_descriptor.desc_count++;
 
@@ -734,7 +785,7 @@ buffer_zero_dsa_batch_add_task(struct batch_buffer_zero_task *batch_task,
  */
 __attribute__((unused))
 static int
-buffer_zero_dsa_batch_async(struct batch_buffer_zero_task *batch_task)
+buffer_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task)
 {
     assert(batch_task->batch_descriptor.desc_count <= DSA_BATCH_SIZE);
     assert(batch_task->status == DSA_TASK_READY);
@@ -757,8 +808,8 @@ buffer_zero_dsa_batch_async(struct batch_buffer_zero_task *batch_task)
 int configure_dsa(const char *dsa_path)
 {
     void *dsa_wq = MAP_FAILED;
-    dedicated_mode = false;
-    max_retry_count = 3000;
+    dedicated_mode = true;
+    max_retry_count = 100000;
     total_bytes_checked = 0;
     total_function_calls = 0;
     total_success_count = 0;
@@ -788,7 +839,32 @@ void dsa_cleanup(void)
     dsa_device_cleanup(&dsa_device_instance);
 }
 
+void buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
+                              const void **buf, size_t count,
+                              size_t len, bool *result)
+{
+    if (count == 0) {
+        return;
+    }
+
+    assert(len != 0);
+
+    if (count == 1) {
+        // DSA doesn't take batch operation with only 1 task.
+        buffer_zero_dsa(buf, len);
+    } else {
+        buffer_zero_dsa_batch(batch_task, buf, count, len, result);
+    }
+}
+
 #else
+
+void buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
+                              const void **buf, size_t count,
+                              size_t len, bool *result)
+{
+    exit(1);
+}
 
 int configure_dsa(const char *dsa_path)
 {

@@ -188,6 +188,7 @@ Property migration_properties[] = {
     DEFINE_PROP_MIG_CAP("x-return-path", MIGRATION_CAPABILITY_RETURN_PATH),
     DEFINE_PROP_MIG_CAP("x-multifd", MIGRATION_CAPABILITY_MULTIFD),
     DEFINE_PROP_MIG_CAP("x-main-zero-page", MIGRATION_CAPABILITY_MAIN_ZERO_PAGE),
+    DEFINE_PROP_MIG_CAP("x-multifd-dsa-accel", MIGRATION_CAPABILITY_MULTIFD_DSA_ACCEL),
     DEFINE_PROP_MIG_CAP("x-background-snapshot",
             MIGRATION_CAPABILITY_BACKGROUND_SNAPSHOT),
 #ifdef CONFIG_LINUX
@@ -275,6 +276,13 @@ bool migrate_use_main_zero_page(void)
     MigrationState *s = migrate_get_current();
 
     return s->capabilities[MIGRATION_CAPABILITY_MAIN_ZERO_PAGE];
+}
+
+bool migrate_multifd_dsa_accel(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->capabilities[MIGRATION_CAPABILITY_MULTIFD_DSA_ACCEL];
 }
 
 bool migrate_pause_before_switchover(void)
@@ -431,6 +439,7 @@ INITIALIZE_MIGRATE_CAPS_SET(check_caps_background_snapshot,
     MIGRATION_CAPABILITY_RETURN_PATH,
     MIGRATION_CAPABILITY_MULTIFD,
     MIGRATION_CAPABILITY_MAIN_ZERO_PAGE,
+    MIGRATION_CAPABILITY_MULTIFD_DSA_ACCEL,
     MIGRATION_CAPABILITY_PAUSE_BEFORE_SWITCHOVER,
     MIGRATION_CAPABILITY_AUTO_CONVERGE,
     MIGRATION_CAPABILITY_RELEASE_RAM,
@@ -496,6 +505,9 @@ bool migrate_caps_check(bool *old_caps, bool *new_caps, Error **errp)
         }
         if (new_caps[MIGRATION_CAPABILITY_MAIN_ZERO_PAGE]) {
             error_setg(errp, "Postcopy is not yet compatible with main zero copy");
+        }
+        if (new_caps[MIGRATION_CAPABILITY_MULTIFD_DSA_ACCEL]) {
+            error_setg(errp, "Postcopy is not yet compatible with dsa accel");
         }
     }
 

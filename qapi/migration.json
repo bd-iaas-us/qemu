@@ -519,6 +519,9 @@
 #                  the multifd threads.
 #                  (since 7.1)
 #
+# @multifd-dsa-accel: If enabled, use DSA accelerator offloading for
+#                     certain memory operations. (since 8.0)
+#
 # Features:
 #
 # @unstable: Members @x-colo and @x-ignore-shared are experimental.
@@ -535,7 +538,7 @@
            { 'name': 'x-ignore-shared', 'features': [ 'unstable' ] },
            'validate-uuid', 'background-snapshot',
            'zero-copy-send', 'postcopy-preempt', 'switchover-ack',
-           'main-zero-page'] }
+           'main-zero-page', 'multifd-dsa-accel'] }
 
 ##
 # @MigrationCapabilityStatus:
