@@ -952,7 +952,7 @@ void buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
 
     if (count == 1) {
         // DSA doesn't take batch operation with only 1 task.
-        result[0] = buffer_zero_dsa(buf, len);
+        result[0] = buffer_zero_dsa(buf[0], len);
     } else {
         assert(batch_task != NULL);
         buffer_zero_dsa_batch(batch_task, buf, count, len, result);
