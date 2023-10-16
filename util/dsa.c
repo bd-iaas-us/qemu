@@ -163,8 +163,9 @@ dsa_device_cleanup(struct dsa_device *instance)
  * @param group A pointer to the DSA device group.
  * @param num_dsa_devices The number of DSA devices this group will have.
  */
-static void
-dsa_device_group_init(struct dsa_device_group *group, int num_dsa_devices)
+static int
+dsa_device_group_init(struct dsa_device_group *group,
+                      const char **dsa_path, int num_dsa_devices)
 {
     group->dsa_devices =
         malloc(sizeof(struct dsa_device) * num_dsa_devices);
@@ -175,25 +176,8 @@ dsa_device_group_init(struct dsa_device_group *group, int num_dsa_devices)
     qemu_mutex_init(&group->task_queue_lock);
     qemu_cond_init(&group->task_queue_cond);
     QSIMPLEQ_INIT(&group->task_queue);
-}
 
-/**
- * @brief Starts a DSA device group.
- * 
- * @param group A pointer to the DSA device group.
- * @param dsa_path An array of DSA device path.
- * @param num_dsa_devices The number of DSA devices in the device group.
- *
- * @return int Zero if successful, otherwise non-zero.
- */
-static int
-dsa_device_group_start(struct dsa_device_group *group,
-                       const char **dsa_path, int num_dsa_devices)
-{
     void *dsa_wq = MAP_FAILED;
-
-    assert(num_dsa_devices <= group->num_dsa_devices);
-
     for (int i = 0; i < num_dsa_devices; i++) {
         dsa_wq = map_dsa_device(dsa_path[i]);
         if (dsa_wq == MAP_FAILED) {
@@ -203,24 +187,31 @@ dsa_device_group_start(struct dsa_device_group *group,
         }
         dsa_device_init(&dsa_group.dsa_devices[i], dsa_wq);
     }
-
-    group->running = true;
-
     return 0;
+}
+
+/**
+ * @brief Starts a DSA device group.
+ * 
+ * @param group A pointer to the DSA device group.
+ * @param dsa_path An array of DSA device path.
+ * @param num_dsa_devices The number of DSA devices in the device group.
+ */
+static void
+dsa_device_group_start(struct dsa_device_group *group)
+{
+    group->running = true;
 }
 
 /**
  * @brief Stops a DSA device group.
  * 
- * @param instance A pointer to the DSA device group to stop.
+ * @param group A pointer to the DSA device group.
  */
 static void
 dsa_device_group_stop(struct dsa_device_group *group)
 {
-    qemu_mutex_lock(&group->task_queue_lock);
     group->running = false;
-    qemu_cond_signal(&group->task_queue_cond);
-    qemu_mutex_unlock(&group->task_queue_lock);
 }
 
 /**
@@ -238,6 +229,7 @@ dsa_device_group_cleanup(struct dsa_device_group *group)
         dsa_device_cleanup(&group->dsa_devices[i]);
     }
     free(group->dsa_devices);
+    group->dsa_devices = NULL;
 
     qemu_mutex_destroy(&group->task_queue_lock);
     qemu_cond_destroy(&group->task_queue_cond);
@@ -263,6 +255,22 @@ dsa_device_group_get_next_device(struct dsa_device_group *group)
 }
 
 /**
+ * @brief Empties out the DSA task queue.
+ * 
+ * @param group A pointer to the DSA device group.
+ */
+static void 
+dsa_empty_task_queue(struct dsa_device_group *group)
+{
+    qemu_mutex_lock(&group->task_queue_lock);
+    dsa_task_queue *task_queue = &group->task_queue;
+    while (!QSIMPLEQ_EMPTY(task_queue)) {
+        QSIMPLEQ_REMOVE_HEAD(task_queue, entry);
+    }
+    qemu_mutex_unlock(&group->task_queue_lock);
+}
+
+/**
  * @brief Adds a task to the DSA task queue.
  * 
  * @param group A pointer to the DSA device group.
@@ -281,6 +289,12 @@ dsa_task_enqueue(struct dsa_device_group *group,
     bool notify = false;
 
     qemu_mutex_lock(task_queue_lock);
+
+    if (!group->running) {
+        fprintf(stderr, "DSA: Tried to queue task to stopped device queue\n");
+        qemu_mutex_unlock(task_queue_lock);
+        return -1;
+    }
 
     // The queue is empty. This enqueue operation is a 0->1 transition.
     if (QSIMPLEQ_EMPTY(task_queue))
@@ -690,20 +704,26 @@ dsa_completion_thread_init(
 }
 
 /**
- * @brief Stops the DSA completion thread.
- *
- * @param opaque A pointer to the thread context.
+ * @brief Stops the completion thread (and implicitly, the device group).
+ * 
+ * @param opaque A pointer to the completion thread.
  */
-static void
-dsa_completion_thread_stop(void *opaque)
+static void dsa_completion_thread_stop(void *opaque)
 {
     struct dsa_completion_thread *thread_context =
         (struct dsa_completion_thread *)opaque;
+
+    struct dsa_device_group *group = thread_context->group;
+
+    qemu_mutex_lock(&group->task_queue_lock);
 
     thread_context->stopping = true;
     thread_context->running = false;
 
     dsa_device_group_stop(thread_context->group);
+
+    qemu_cond_signal(&group->task_queue_cond);
+    qemu_mutex_unlock(&group->task_queue_lock);
 
     qemu_thread_join(&thread_context->thread);
 
@@ -1149,14 +1169,17 @@ dsa_globals_init(void)
  */
 int dsa_configure(const char **dsa_path, int num_dsa_devices)
 {
+    if (num_dsa_devices < 1) {
+        return 0;
+    }
+
     int ret;
 
     dsa_globals_init();
 
-    dsa_device_group_init(&dsa_group, num_dsa_devices);
-    ret = dsa_device_group_start(&dsa_group, dsa_path, num_dsa_devices);
+    ret = dsa_device_group_init(&dsa_group, dsa_path, num_dsa_devices);
     if (ret != 0) {
-        return ret; 
+        return ret;
     }
 
     /*
@@ -1171,7 +1194,7 @@ int dsa_configure(const char **dsa_path, int num_dsa_devices)
 }
 
 /**
- * @brief Starts the DSA completion thread.
+ * @brief Start logic to enable using DSA.
  * 
  */
 void dsa_start(void)
@@ -1179,19 +1202,29 @@ void dsa_start(void)
     if (dsa_group.num_dsa_devices == 0) {
         return;
     }
+    if (dsa_group.running) {
+        return;
+    }
+    dsa_device_group_start(&dsa_group);
     dsa_completion_thread_init(&completion_thread, &dsa_group);
 }
 
 /**
- * @brief Stops the DSA completion thread.
+ * @brief Stop logic to clean up DSA by halting the device group and cleaning up
+ * the completion thread.
  * 
  */
 void dsa_stop(void)
 {
-    if (!completion_thread.running) {
+    struct dsa_device_group *group = &dsa_group;
+
+    if (!group->running) {
         return;
     }
+
     dsa_completion_thread_stop(&completion_thread);
+
+    dsa_empty_task_queue(group);
 }
 
 /**
