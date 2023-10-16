@@ -495,32 +495,22 @@ poll_completion(struct dsa_completion_record *completion,
 }
 
 /**
- * @brief Complete a single DSA task in the batch task. 
- *
- * @param task A pointer to the batch task structure.
+ * @brief Use CPU to complete a single zero page checking task.
+ * 
+ * @param task A pointer to the task.
  */
 static void
-poll_task_completion(struct buffer_zero_batch_task *task)
+task_cpu_fallback(struct buffer_zero_batch_task *task)
 {
     assert(task->task_type == DSA_TASK);
 
     struct dsa_completion_record *completion = &task->completions[0];
-    uint8_t status;
     const uint8_t *buf;
     size_t len;
 
-    poll_completion(completion, task->descriptors[0].opcode);
-    
-    status = completion->status;
-    if (status == DSA_COMP_SUCCESS) {
-        value_inc(&dsa_counters.total_success_count);
-        task->results[0] = (completion->result == 0);
+    if (completion->status == DSA_COMP_SUCCESS) {
         return;
     }
-
-    assert(status == DSA_COMP_PAGE_FAULT_NOBOF);
-
-    value_inc(&dsa_counters.total_bof_fail);
 
     /*
      * DSA was able to partially complete the operation. Check the
@@ -537,7 +527,91 @@ poll_task_completion(struct buffer_zero_batch_task *task)
     buf = (const uint8_t *)task->descriptors[0].src_addr;
     len = task->descriptors[0].xfer_size;
     task->results[0] = buffer_zero_fallback(buf + completion->bytes_completed,
-                                            len - completion->bytes_completed);
+                                            len - completion->bytes_completed); 
+}
+
+/**
+ * @brief Complete a single DSA task in the batch task. 
+ *
+ * @param task A pointer to the batch task structure.
+ */
+static void
+poll_task_completion(struct buffer_zero_batch_task *task)
+{
+    assert(task->task_type == DSA_TASK);
+
+    struct dsa_completion_record *completion = &task->completions[0];
+    uint8_t status;
+
+    poll_completion(completion, task->descriptors[0].opcode);
+    
+    status = completion->status;
+    if (status == DSA_COMP_SUCCESS) {
+        value_inc(&dsa_counters.total_success_count);
+        task->results[0] = (completion->result == 0);
+        return;
+    }
+
+    assert(status == DSA_COMP_PAGE_FAULT_NOBOF);
+
+    value_inc(&dsa_counters.total_bof_fail);
+}
+
+/**
+ * @brief Use CPU to complete the zero page checking batch task.
+ * 
+ * @param batch_task A pointer to the batch task.
+ */
+static void
+batch_task_cpu_fallback(struct buffer_zero_batch_task *batch_task)
+{
+    assert(batch_task->task_type == DSA_BATCH_TASK);
+
+    struct dsa_completion_record *batch_completion =
+        &batch_task->batch_completion;
+    struct dsa_completion_record *completion;
+    uint8_t status;
+    const uint8_t *buf;
+    size_t len;
+    bool *results = batch_task->results;
+    uint32_t count = batch_task->batch_descriptor.desc_count;
+
+    // DSA is able to complete the entire batch task.
+    if (batch_completion->status == DSA_COMP_SUCCESS) {
+        assert(count == batch_completion->bytes_completed);
+        return;
+    }
+
+    /*
+     * DSA encounters some error and is not able to complete
+     * the entire batch task. Use CPU fallback.
+     */
+    for (int i = 0; i < count; i++) {
+        completion = &batch_task->completions[i];
+        status = completion->status;
+        if (status == DSA_COMP_SUCCESS) {
+            continue;
+        }
+        assert(status == DSA_COMP_PAGE_FAULT_NOBOF);
+
+        /*
+         * DSA was able to partially complete the operation. Check the
+         * result. If we already know this is not a zero page, we can
+         * return now.
+         */
+        if (completion->bytes_completed != 0 && completion->result != 0) {
+            results[i] = false;
+            continue;
+        }
+
+        /* Let's fallback to use CPU to complete it. */
+        value_inc(&dsa_counters.total_fallback_count);
+        buf = (uint8_t *)batch_task->descriptors[i].src_addr;
+        len = batch_task->descriptors[i].xfer_size;
+        results[i] =
+            buffer_zero_fallback(buf + completion->bytes_completed,
+                                 len - completion->bytes_completed);      
+    }
 }
 
 /**
@@ -553,8 +627,6 @@ poll_batch_task_completion(struct buffer_zero_batch_task *batch_task)
     struct dsa_completion_record *completion;
     uint8_t batch_status;
     uint8_t status;
-    const uint8_t *buf;
-    size_t len;
     bool *results = batch_task->results;
     uint32_t count = batch_task->batch_descriptor.desc_count;
 
@@ -599,24 +671,6 @@ poll_batch_task_completion(struct buffer_zero_batch_task *batch_task)
                     "Unexpected completion status = %u.\n", status);
             assert(false);
         }
-
-        /*
-         * DSA was able to partially complete the operation. Check the
-         * result. If we already know this is not a zero page, we can
-         * return now.
-         */
-        if (completion->bytes_completed != 0 && completion->result != 0) {
-            results[i] = false;
-            continue;
-        }
-
-        /* Let's fallback to use CPU to complete it. */
-        value_inc(&dsa_counters.total_fallback_count);
-        buf = (uint8_t *)batch_task->descriptors[i].src_addr;
-        len = batch_task->descriptors[i].xfer_size;
-        results[i] =
-            buffer_zero_fallback(buf + completion->bytes_completed,
-                                 len - completion->bytes_completed);
     }   
 }
 
@@ -815,6 +869,23 @@ buffer_zero_dsa_wait(struct buffer_zero_batch_task *batch_task)
 }
 
 /**
+ * @brief Use CPU to complete the zero page checking task if DSA
+ *        is not able to complete it.
+ * 
+ * @param batch_task A pointer to the batch task.
+ */
+static void
+buffer_zero_cpu_fallback(struct buffer_zero_batch_task *batch_task)
+{
+    if (batch_task->task_type == DSA_TASK) {
+        task_cpu_fallback(batch_task);
+    } else {
+        assert(batch_task->task_type == DSA_BATCH_TASK);
+        batch_task_cpu_fallback(batch_task);
+    }
+}
+
+/**
  * @brief Initializes a buffer zero batch task.
  *
  * @param task A pointer to the batch task to initialize.
@@ -977,75 +1048,6 @@ buffer_zero_dsa(struct buffer_zero_batch_task *task,
 }
 
 /**
- * @brief Sends multiple memory comparison tasks to a DSA device and wait
- *        for all tasks to complete. This is not using batch task in DSA. This
- *        sends multiple non-batch tasks in a loop. 
- * 
- * @param batch_task A pointer to the DSA batch task structure.
- * @param buf An array of memory buffer.
- * @param count The number of buffers in the buf array.
- * @param len The length of each memory buffer.
- * @param result An array of memory buffer comparison results.
- */
-__attribute__((unused))
-static void
-buffer_zero_dsa_multiple(struct buffer_zero_batch_task *batch_task,
-                         const void **buf, size_t count, size_t len, 
-                         bool *result)
-{
-    struct dsa_hw_desc *descriptor;
-    struct dsa_completion_record *completion;
-    uint8_t status;
-
-    assert(count != 0);
-    assert(count <= DSA_BATCH_SIZE);
-
-    buffer_zero_batch_task_set(batch_task, buf, count, len);
-
-    for (int i = 0; i < count; i++) {
-        submit_wi(batch_task->device->work_queue, &batch_task->descriptors[i]);
-    }
-
-    for (int i = 0; i < count; i++) {
-
-        descriptor = &batch_task->descriptors[i];
-        completion = &batch_task->completions[i];
-        poll_completion(completion, descriptor->opcode);
-
-        status = completion->status;
-
-        if (status == DSA_COMP_SUCCESS) {
-            result[i] = (completion->result == 0);
-            value_inc(&dsa_counters.total_success_count);
-            continue;
-        }
-
-        if (status == DSA_COMP_PAGE_FAULT_NOBOF) {
-            value_inc(&dsa_counters.total_bof_fail);
-        } else {
-            fprintf(stderr,
-                    "Unexpected completion status = %u.\n", status);
-        }
-
-        /*
-         * DSA was able to partially complete the operation. Check the
-         * result. If we already know this is not a zero page, we can
-         * return now.
-         */
-        if (completion->bytes_completed != 0 && completion->result != 0) {
-            result[i] = false;
-            continue;
-        }
-
-        /* Let's fallback to use CPU to complete it. */
-        value_inc(&dsa_counters.total_fallback_count);
-        result[i] =
-            buffer_zero_fallback((uint8_t *)buf[i] + completion->bytes_completed,
-                                 len - completion->bytes_completed);
-    }
-}
-
-/**
  * @brief Sends multiple memory comparison tasks to a DSA device in a batch
  *        operation and wait for the batch to complete. 
  * 
@@ -1064,22 +1066,6 @@ buffer_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
 
     submit_wi(batch_task->device->work_queue, &batch_task->batch_descriptor);
     poll_batch_task_completion(batch_task);
-}
-
-__attribute__((unused))
-static void
-buffer_is_zero_dsa_batch_mode(struct buffer_zero_batch_task *batch_task,
-                              const void **buf, size_t count,
-                              size_t len)
-{
-    assert(len != 0);
-
-    if (count == 1) {
-        // DSA doesn't take batch operation with only 1 task.
-        buffer_zero_dsa(batch_task, buf, len);
-    } else {
-        buffer_zero_dsa_batch(batch_task, buf, count, len);
-    }
 }
 
 /**
@@ -1151,7 +1137,8 @@ buffer_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
 static void
 dsa_globals_init(void)
 {
-    dedicated_mode = false;
+    // TODO: Switch to use shared mode.
+    dedicated_mode = true;
     atomic = false;
     max_retry_count = UINT64_MAX;
     memset(&dsa_counters, 0, sizeof(dsa_counters));
@@ -1299,6 +1286,8 @@ buffer_is_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
     }
 
     buffer_zero_dsa_wait(batch_task);
+
+    buffer_zero_cpu_fallback(batch_task);
 
     return 0;
 }
