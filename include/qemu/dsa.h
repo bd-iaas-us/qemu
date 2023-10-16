@@ -45,12 +45,27 @@ struct buffer_zero_batch_task {
 
 void buffer_zero_task_init(struct buffer_zero_task *task);
 
+// You must call init on a task before using it in a batch call.
 void buffer_zero_batch_task_init(struct buffer_zero_batch_task *task);
 
-void buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
+// Returns 0 on success, or -1 on error.
+// Right now the only error is if `count` is too big.
+int buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
                               const void **buf, size_t count,
                               size_t len, bool *result);
 
+struct dsa_counters {
+    uint64_t total_bytes_checked;
+    uint64_t total_success_count;
+    uint64_t total_batch_success_count;
+    uint64_t total_bof_fail;
+    uint64_t total_batch_fail;
+    uint64_t total_batch_bof;
+    uint64_t total_fallback_count;
+    uint64_t top_retry_count;
+};
+
+extern struct dsa_counters dsa_counters; // Kind of awkward to have a public variable named `counters`
 
 #endif
 
