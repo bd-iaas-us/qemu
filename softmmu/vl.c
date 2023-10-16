@@ -3649,7 +3649,7 @@ void qemu_init(int argc, char **argv)
      * compat properties have been set up.
      */
     migration_object_init();
-    if (configure_dsa(dsa_path, num_dsa_devices)) {
+    if (dsa_configure(dsa_path, num_dsa_devices)) {
         exit(1);
     }
 

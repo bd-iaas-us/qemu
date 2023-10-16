@@ -1,6 +1,9 @@
 #ifndef QEMU_DSA_H
 #define QEMU_DSA_H
 
+#include "qemu/thread.h"
+#include "qemu/queue.h"
+
 typedef void (*buffer_zero_dsa_completion_fn)(void *);
 
 #ifdef CONFIG_DSA_OPT
@@ -14,45 +17,86 @@ typedef void (*buffer_zero_dsa_completion_fn)(void *);
 
 #define DSA_BATCH_SIZE 128
 
+enum dsa_task_type {
+    DSA_TASK = 0,
+    DSA_BATCH_TASK
+};
+
 enum dsa_task_status {
     DSA_TASK_READY = 0,
     DSA_TASK_PROCESSING,
     DSA_TASK_COMPLETION
 };
 
-struct dsa_buffer_zero_completion_context {
-    //TODO: Add context structure to feed the callback fn.
-};
-
-struct buffer_zero_task {
-    struct dsa_completion_record completion __attribute__((aligned(32)));
-    struct dsa_hw_desc descriptor;
-    buffer_zero_dsa_completion_fn completion_callback;
-    struct dsa_buffer_zero_completion_context completion_context;
-    enum dsa_task_status status;
-};
-
-struct buffer_zero_batch_task {
+typedef struct buffer_zero_batch_task {
     struct dsa_hw_desc batch_descriptor;
     struct dsa_hw_desc descriptors[DSA_BATCH_SIZE] __attribute__((aligned(64)));
     struct dsa_completion_record batch_completion __attribute__((aligned(32)));
     struct dsa_completion_record completions[DSA_BATCH_SIZE] __attribute__((aligned(32)));
+    struct dsa_device_group *group;
     struct dsa_device *device;
     buffer_zero_dsa_completion_fn completion_callback;
-    struct dsa_buffer_zero_completion_context completion_contexts[DSA_BATCH_SIZE];
+    QemuSemaphore sem_task_complete;
+    enum dsa_task_type task_type;
     enum dsa_task_status status;
-};
+    bool results[DSA_BATCH_SIZE];
+    QSIMPLEQ_ENTRY(buffer_zero_batch_task) entry;
+} buffer_zero_batch_task;
 
-void buffer_zero_task_init(struct buffer_zero_task *task);
+/**
+ * @brief Check if DSA is running.
+ * 
+ * @return True if DSA is running, otherwise false. 
+ */
+bool dsa_is_running(void);
 
-// You must call init on a task before using it in a batch call.
+/**
+ * @brief Initializes a buffer zero comparison DSA task.
+ *
+ * @param descriptor A pointer to the DSA task descriptor.
+ * @param completion A pointer to the DSA task completion record.
+ */
+void buffer_zero_task_init(struct buffer_zero_batch_task *task);
+
+/**
+ * @brief Initializes a buffer zero batch task.
+ *
+ * @param task A pointer to the batch task to initialize.
+ */
 void buffer_zero_batch_task_init(struct buffer_zero_batch_task *task);
 
-// Returns 0 on success, or -1 on error.
-// Right now the only error is if `count` is too big.
+/**
+ * @brief Performs the proper cleanup on a DSA batch task.
+ * 
+ * @param task A pointer to the batch task to cleanup.
+ */
+void buffer_zero_batch_task_destroy(struct buffer_zero_batch_task *task);
+
+/**
+ * @brief Performs buffer zero comparison on a DSA batch task synchronously.
+ * 
+ * @param batch_task A pointer to the batch task.
+ * @param buf An array of memory buffers.
+ * @param count The number of buffers in the array.
+ * @param len The buffer length.
+ */
 int buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
-                              const void **buf, size_t count,
-                              size_t len, bool *result);
+                             const void **buf, size_t count,
+                             size_t len);
+
+/**
+ * @brief Performs buffer zero comparison on a DSA batch task asynchronously.
+ * 
+ * @param batch_task A pointer to the batch task.
+ * @param buf An array of memory buffers.
+ * @param count The number of buffers in the array.
+ * @param len The buffer length.
+ *
+ * @return Zero if successful, otherwise non-zero.
+ */
+int
+buffer_is_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
+                               const void **buf, size_t count, size_t len);
 
 struct dsa_counters {
     uint64_t total_bytes_checked;

@@ -121,9 +121,6 @@ typedef struct {
     MultiFDPages_t *pages;
     /* Address of each pages in pages */
     ram_addr_t *addr;
-    /* The results of zero page checking */
-    bool *zero_page_results;
-    struct buffer_zero_task *dsa_task;
     struct buffer_zero_batch_task *dsa_batch_task;
 
     /* thread local variables. No locking required */

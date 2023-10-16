@@ -559,6 +559,7 @@ void multifd_save_cleanup(void)
             qemu_thread_join(&p->thread);
         }
     }
+    dsa_stop();
     for (i = 0; i < migrate_multifd_channels(); i++) {
         MultiFDSendParams *p = &multifd_send_state->params[i];
         Error *local_err = NULL;
@@ -577,10 +578,7 @@ void multifd_save_cleanup(void)
         p->pages = NULL;
         g_free(p->addr);
         p->addr = NULL;
-        g_free(p->zero_page_results);
-        p->zero_page_results = NULL;
-        qemu_vfree(p->dsa_task);
-        p->dsa_task = NULL;
+        buffer_zero_batch_task_destroy(p->dsa_batch_task);
         qemu_vfree(p->dsa_batch_task);
         p->dsa_batch_task = NULL;
         p->packet_len = 0;
@@ -740,7 +738,7 @@ static void multifd_zero_page_check(MultiFDSendParams *p,
                                     uint8_t multifd_zero_page_ratio)
 {
     assert(!migrate_use_main_zero_page());
-    assert(!migrate_multifd_dsa_accel());
+    assert(!migrate_multifd_dsa_accel() || !dsa_is_running());
 
     RAMBlock *rb = p->pages->block;
 
@@ -760,8 +758,10 @@ static void multifd_zero_page_check(MultiFDSendParams *p,
 static void multifd_zero_page_check_batch(MultiFDSendParams *p,
                                           uint8_t multifd_zero_page_ratio)
 {
+    bool async_mode = true;
+
     assert(!migrate_use_main_zero_page());
-    assert(migrate_multifd_dsa_accel());
+    assert(migrate_multifd_dsa_accel() && dsa_is_running());
 
     RAMBlock *rb = p->pages->block;
 
@@ -769,22 +769,28 @@ static void multifd_zero_page_check_batch(MultiFDSendParams *p,
         p->addr[i] = (ram_addr_t)(rb->host + p->pages->offset[i]);
     }
 
-    buffer_is_zero_dsa_batch(p->dsa_batch_task,
-                             (const void **)p->addr,
-                             p->pages->num,
-                             p->page_size,
-                             p->zero_page_results);
+    if (!async_mode) {
+        buffer_is_zero_dsa_batch(p->dsa_batch_task,
+                                (const void **)p->addr,
+                                p->pages->num,
+                                p->page_size);
+    } else {
+        buffer_is_zero_dsa_batch_async(p->dsa_batch_task,
+                                       (const void **)p->addr,
+                                       p->pages->num,
+                                       p->page_size);      
+    }
     for (int i = 0; i < p->pages->num; i++) {
         if (multifd_zero_page_ratio <= 100) {
             if (!multifd_zero_page_test_hook(multifd_zero_page_ratio)) {
-                p->zero_page_results[i] = false;
+                p->dsa_batch_task->results[i] = false;
             }
         }
     }
 
     for (int i = 0; i < p->pages->num; i++) {
         uint64_t offset = p->pages->offset[i];
-        bool zero_page = p->zero_page_results[i];
+        bool zero_page = p->dsa_batch_task->results[i];
         set_page(p, zero_page, offset);
     }
 }
@@ -796,7 +802,8 @@ static void *multifd_send_thread(void *opaque)
     Error *local_err = NULL;
     /* older qemu don't understand zero page on multifd channel */
     bool use_multifd_zero_page = !migrate_use_main_zero_page();
-    bool use_multifd_dsa_accel = migrate_multifd_dsa_accel();
+    bool use_multifd_dsa_accel =
+        migrate_multifd_dsa_accel() && dsa_is_running();
     int ret = 0;
     bool use_zero_copy_send = migrate_zero_copy_send();
     uint8_t multifd_zero_page_ratio = migrate_multifd_zero_page_ratio();
@@ -1121,10 +1128,6 @@ int multifd_save_setup(Error **errp)
         p->id = i;
         p->pages = multifd_pages_init(page_count);
         p->addr = g_new0(ram_addr_t, page_count);
-        p->zero_page_results = g_new0(bool, page_count);
-        p->dsa_task = 
-            (struct buffer_zero_task *)qemu_memalign(32, sizeof(*p->dsa_task));
-        buffer_zero_task_init(p->dsa_task);
         p->dsa_batch_task = 
             (struct buffer_zero_batch_task *)qemu_memalign(64, sizeof(*p->dsa_batch_task));
         buffer_zero_batch_task_init(p->dsa_batch_task);
@@ -1161,6 +1164,9 @@ int multifd_save_setup(Error **errp)
             return ret;
         }
     }
+
+    dsa_start();
+
     return 0;
 }
 
@@ -1238,6 +1244,7 @@ void multifd_load_cleanup(void)
 
         qemu_thread_join(&p->thread);
     }
+    dsa_stop();
     for (i = 0; i < migrate_multifd_channels(); i++) {
         MultiFDRecvParams *p = &multifd_recv_state->params[i];
 
@@ -1417,6 +1424,9 @@ int multifd_load_setup(Error **errp)
             return ret;
         }
     }
+
+    dsa_start();
+
     return 0;
 }
 

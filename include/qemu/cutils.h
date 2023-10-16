@@ -193,7 +193,9 @@ void get_fallback_accel(buffer_accel_fn *);
 bool buffer_is_zero(const void *buf, size_t len);
 bool test_buffer_is_zero_next_accel(void);
 
-int configure_dsa(const char **dsa_path, int num_dsa_devices);
+int dsa_configure(const char **dsa_path, int num_dsa_devices);
+void dsa_start(void);
+void dsa_stop(void);
 void dsa_cleanup(void);
 
 /*
