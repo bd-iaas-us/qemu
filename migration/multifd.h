@@ -123,6 +123,9 @@ typedef struct {
     ram_addr_t *addr;
     struct buffer_zero_batch_task *dsa_batch_task;
 
+    uint32_t normal_page_index;
+    uint32_t normal_page_counter;
+
     /* thread local variables. No locking required */
 
     /* pointer to the packet */

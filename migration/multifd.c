@@ -685,40 +685,34 @@ int multifd_send_sync_main(QEMUFile *f)
     return 0;
 }
 
-static QemuMutex zero_page_lock;
-static uint32_t zero_page_index;
-static uint32_t zero_page_counter;
-
 /**
- * @brief Multifd zero page test hook.
+ * @brief Multifd normal page test hook.
  * 
- * @param multifd_zero_page_ratio The value is between 0 to 100. If the value
- * is 10, it means 10% of the pages are zero page.
- * @return true if we want to make the current page a zero page. 
- * @return false if we want to make the current page a normal page.
+ * @param multifd_normal_page_ratio The value is between 0 to 100.
+ * If the value is 10, it means at least 10% of the pages are normal page.
+ * A zero page can be made a normal page but not the other way around.
+ * @return true if we want to make the current page a normal page. 
+ * @return false if we don't want to make the current page a normal page.
  */
-static bool multifd_zero_page_test_hook(uint8_t multifd_zero_page_ratio)
+static bool multifd_normal_page_test_hook(MultiFDSendParams *p,
+                                          uint8_t multifd_normal_page_ratio)
 {
-    bool is_zero_page;
+    bool is_normal_page;
 
-    qemu_mutex_lock(&zero_page_lock);
-
-    if (zero_page_counter < multifd_zero_page_ratio) {
-        is_zero_page = true;
+    if (p->normal_page_counter < multifd_normal_page_ratio) {
+        is_normal_page = true;
     } else {
-        is_zero_page = false;
+        is_normal_page = false;
     }
-    zero_page_index++;
-    zero_page_counter++;
+    p->normal_page_index++;
+    p->normal_page_counter++;
 
-    if (zero_page_index >= 100) {
-        zero_page_index = 0;
-        zero_page_counter = 0;
+    if (p->normal_page_index >= 100) {
+        p->normal_page_index = 0;
+        p->normal_page_counter = 0;
     }
 
-    qemu_mutex_unlock(&zero_page_lock);
-
-    return is_zero_page;
+    return is_normal_page;
 }
 
 static void set_page(MultiFDSendParams *p, bool zero_page, uint64_t offset)
@@ -735,7 +729,7 @@ static void set_page(MultiFDSendParams *p, bool zero_page, uint64_t offset)
 }
 
 static void multifd_zero_page_check(MultiFDSendParams *p,
-                                    uint8_t multifd_zero_page_ratio)
+                                    uint8_t multifd_normal_page_ratio)
 {
     assert(!migrate_use_main_zero_page());
     assert(!migrate_multifd_dsa_accel() || !dsa_is_running());
@@ -744,10 +738,9 @@ static void multifd_zero_page_check(MultiFDSendParams *p,
 
     for (int i = 0; i < p->pages->num; i++) {
         uint64_t offset = p->pages->offset[i];
-        bool zero_page = false;
-        zero_page = buffer_is_zero(rb->host + offset, p->page_size);
-        if (multifd_zero_page_ratio <= 100) {
-            if (!multifd_zero_page_test_hook(multifd_zero_page_ratio)) {
+        bool zero_page = buffer_is_zero(rb->host + offset, p->page_size);
+        if (multifd_normal_page_ratio <= 100) {
+            if (multifd_normal_page_test_hook(p, multifd_normal_page_ratio)) {
                 zero_page = false;
             }
         }
@@ -756,7 +749,7 @@ static void multifd_zero_page_check(MultiFDSendParams *p,
 }
 
 static void multifd_zero_page_check_batch(MultiFDSendParams *p,
-                                          uint8_t multifd_zero_page_ratio)
+                                          uint8_t multifd_normal_page_ratio)
 {
     bool async_mode = true;
 
@@ -781,8 +774,8 @@ static void multifd_zero_page_check_batch(MultiFDSendParams *p,
                                        p->page_size);      
     }
     for (int i = 0; i < p->pages->num; i++) {
-        if (multifd_zero_page_ratio <= 100) {
-            if (!multifd_zero_page_test_hook(multifd_zero_page_ratio)) {
+        if (multifd_normal_page_ratio <= 100) {
+            if (multifd_normal_page_test_hook(p, multifd_normal_page_ratio)) {
                 p->dsa_batch_task->results[i] = false;
             }
         }
@@ -806,7 +799,7 @@ static void *multifd_send_thread(void *opaque)
         migrate_multifd_dsa_accel() && dsa_is_running();
     int ret = 0;
     bool use_zero_copy_send = migrate_zero_copy_send();
-    uint8_t multifd_zero_page_ratio = migrate_multifd_zero_page_ratio();
+    uint8_t multifd_normal_page_ratio = migrate_multifd_normal_page_ratio();
 
     uint64_t start;
     uint64_t end;
@@ -854,9 +847,9 @@ static void *multifd_send_thread(void *opaque)
             start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
             start_cycles = __rdtsc();
             if (!use_multifd_zero_page || !use_multifd_dsa_accel) {
-                multifd_zero_page_check(p, multifd_zero_page_ratio);
+                multifd_zero_page_check(p, multifd_normal_page_ratio);
             } else {
-                multifd_zero_page_check_batch(p, multifd_zero_page_ratio);
+                multifd_zero_page_check_batch(p, multifd_normal_page_ratio);
             }
             end = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
             end_cycles = __rdtsc();
@@ -1106,8 +1099,6 @@ int multifd_save_setup(Error **errp)
     if (!migrate_multifd()) {
         return 0;
     }
-
-    qemu_mutex_init(&zero_page_lock);
 
     thread_count = migrate_multifd_channels();
     multifd_send_state = g_malloc0(sizeof(*multifd_send_state));

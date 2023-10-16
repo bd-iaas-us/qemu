@@ -377,10 +377,10 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
             }
         }
 
-        if (params->has_multifd_zero_page_ratio) {
+        if (params->has_multifd_normal_page_ratio) {
             monitor_printf(mon, "%s: %u\n",
-                MigrationParameter_str(MIGRATION_PARAMETER_MULTIFD_ZERO_PAGE_RATIO),
-                params->multifd_zero_page_ratio);
+                MigrationParameter_str(MIGRATION_PARAMETER_MULTIFD_NORMAL_PAGE_RATIO),
+                params->multifd_normal_page_ratio);
         }
     }
 
@@ -638,9 +638,9 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         error_setg(&err, "The block-bitmap-mapping parameter can only be set "
                    "through QMP");
         break;
-    case MIGRATION_PARAMETER_MULTIFD_ZERO_PAGE_RATIO:
-        p->has_multifd_zero_page_ratio = true;
-        visit_type_uint8(v, param, &p->multifd_zero_page_ratio, &err);
+    case MIGRATION_PARAMETER_MULTIFD_NORMAL_PAGE_RATIO:
+        p->has_multifd_normal_page_ratio = true;
+        visit_type_uint8(v, param, &p->multifd_normal_page_ratio, &err);
         break;
     default:
         assert(0);
