@@ -6,6 +6,8 @@
 
 typedef void (*buffer_zero_dsa_completion_fn)(void *);
 
+#define DSA_BATCH_SIZE 128
+
 #ifdef CONFIG_DSA_OPT
 
 #pragma GCC push_options
@@ -45,20 +47,42 @@ typedef struct buffer_zero_batch_task {
     QSIMPLEQ_ENTRY(buffer_zero_batch_task) entry;
 } buffer_zero_batch_task;
 
+struct dsa_counters {
+    uint64_t total_bytes_checked;
+    uint64_t total_success_count;
+    uint64_t total_batch_success_count;
+    uint64_t total_bof_fail;
+    uint64_t total_batch_fail;
+    uint64_t total_batch_bof;
+    uint64_t total_fallback_count;
+    uint64_t top_retry_count;
+};
+
+#else 
+
+struct buffer_zero_batch_task {
+    bool results[DSA_BATCH_SIZE];
+};
+
+struct dsa_counters {
+
+};
+
+#endif 
+
+/**
+ * @brief Get a read-only reference to DSA counters.
+ * 
+ * @return Read-only DSA counters.
+ */
+struct dsa_counters* dsa_get_counters(void);
+
 /**
  * @brief Check if DSA is running.
  * 
  * @return True if DSA is running, otherwise false. 
  */
 bool dsa_is_running(void);
-
-/**
- * @brief Initializes a buffer zero comparison DSA task.
- *
- * @param descriptor A pointer to the DSA task descriptor.
- * @param completion A pointer to the DSA task completion record.
- */
-void buffer_zero_task_init(struct buffer_zero_batch_task *task);
 
 /**
  * @brief Initializes a buffer zero batch task.
@@ -101,20 +125,5 @@ int buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
 int
 buffer_is_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
                                const void **buf, size_t count, size_t len);
-
-struct dsa_counters {
-    uint64_t total_bytes_checked;
-    uint64_t total_success_count;
-    uint64_t total_batch_success_count;
-    uint64_t total_bof_fail;
-    uint64_t total_batch_fail;
-    uint64_t total_batch_bof;
-    uint64_t total_fallback_count;
-    uint64_t top_retry_count;
-};
-
-extern struct dsa_counters dsa_counters; // Kind of awkward to have a public variable named `counters`
-
-#endif
 
 #endif

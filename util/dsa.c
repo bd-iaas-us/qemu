@@ -775,7 +775,7 @@ static void dsa_completion_thread_stop(void *opaque)
     thread_context->stopping = true;
     thread_context->running = false;
 
-    dsa_device_group_stop(thread_context->group);
+    dsa_device_group_stop(group);
 
     qemu_cond_signal(&group->task_queue_cond);
     qemu_mutex_unlock(&group->task_queue_lock);
@@ -938,7 +938,7 @@ buffer_zero_batch_task_destroy(struct buffer_zero_batch_task *task)
     qemu_vfree(task->descriptors);
     qemu_vfree(task->completions);
     g_free(task->results);
-
+    
     qemu_sem_destroy(&task->sem_task_complete);
 }
 
@@ -1160,6 +1160,11 @@ dsa_globals_init(void)
     memset(&dsa_counters, 0, sizeof(dsa_counters));
 }
 
+struct dsa_counters* dsa_get_counters(void)
+{
+    return &dsa_counters;
+}
+
 /**
  * @brief Check if DSA devices are enabled in the current system
  *        and set DSA offloading for zero page checking operation.
@@ -1296,7 +1301,7 @@ buffer_is_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
 
     if (count == 1) {
         // DSA doesn't take batch operation with only 1 task.
-        buffer_zero_dsa_async(batch_task, buf, len);
+        buffer_zero_dsa_async(batch_task, buf[0], len);
     } else {
         buffer_zero_dsa_batch_async(batch_task, buf, count, len);
     }
@@ -1309,6 +1314,20 @@ buffer_is_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
 }
 
 #else
+
+bool dsa_is_running(void)
+{
+    return false;
+}
+
+void buffer_zero_batch_task_init(struct buffer_zero_batch_task *task) {}
+
+void buffer_zero_batch_task_destroy(struct buffer_zero_batch_task *task) {}
+
+struct dsa_counters* dsa_get_counters(void)
+{
+    return NULL;
+}
 
 int
 buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
