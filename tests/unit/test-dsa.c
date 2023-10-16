@@ -32,13 +32,13 @@ static struct buffer_zero_batch_task batch_task __attribute__((aligned(64)));
 
 // TODO Communicate that DSA must be configured to support this batch size.
 // TODO Alternatively, poke the DSA device to figure out batch size.
-static int batch_size = DSA_BATCH_SIZE;
+static int batch_size = 128;
 static int page_size = 4096;
 
 // A helper for running a single task and checking for correctness.
 static void do_single_task(void)
 {
-    buffer_zero_batch_task_init(&batch_task);
+    buffer_zero_batch_task_init(&batch_task, batch_size);
     char buf[page_size];
     char* ptr = buf;
 
@@ -53,7 +53,7 @@ static void test_single_zero(void)
 {
     g_assert(!dsa_configure(path, 1));
 
-    buffer_zero_batch_task_init(&batch_task);
+    buffer_zero_batch_task_init(&batch_task, batch_size);
 
     char buf[page_size];
     char* ptr = buf;
@@ -72,7 +72,7 @@ static void test_single_nonzero(void)
 {
     g_assert(!dsa_configure(path, 1));
 
-    buffer_zero_batch_task_init(&batch_task);
+    buffer_zero_batch_task_init(&batch_task, batch_size);
 
     char buf[page_size];
     char* ptr = buf;
@@ -120,9 +120,9 @@ static void test_oversized_batch(void)
 {
     g_assert(!dsa_configure(path, 1));
 
-    buffer_zero_batch_task_init(&batch_task);
+    buffer_zero_batch_task_init(&batch_task, batch_size);
 
-    int oversized_batch_size = DSA_BATCH_SIZE + 1;
+    int oversized_batch_size = batch_size + 1;
     char buf[page_size * oversized_batch_size];
     char *addrs[batch_size];
     for (int i = 0; i < oversized_batch_size; i++) {
@@ -144,7 +144,7 @@ static void test_zero_len(void)
     if (g_test_subprocess()) {
         g_assert(!dsa_configure(path, 1));
 
-        buffer_zero_batch_task_init(&batch_task);
+        buffer_zero_batch_task_init(&batch_task, batch_size);
 
         char buf[page_size];
 
@@ -160,7 +160,7 @@ static void test_null_buf(void)
     if (g_test_subprocess()) {
         g_assert(!dsa_configure(path, 1));
 
-        buffer_zero_batch_task_init(&batch_task);
+        buffer_zero_batch_task_init(&batch_task, batch_size);
 
         buffer_is_zero_dsa_batch(&batch_task, NULL, 1, page_size);
     } else {
@@ -173,7 +173,7 @@ static void test_batch(void)
 {
     g_assert(!dsa_configure(path, 1));
 
-    buffer_zero_batch_task_init(&batch_task);
+    buffer_zero_batch_task_init(&batch_task, batch_size);
 
     char buf[page_size * batch_size];
     char *addrs[batch_size];
@@ -212,7 +212,7 @@ static void test_page_fault(void)
     uint64_t fallback_count = dsa_counters.total_fallback_count;
 
     for (int j = 0; j < 2; j++) {
-        buffer_zero_batch_task_init(&batch_task);
+        buffer_zero_batch_task_init(&batch_task, batch_size);
 
         char *addrs[batch_size];
         for (int i = 0; i < batch_size; i++) {
@@ -244,7 +244,7 @@ static void test_various_buffer_sizes(void)
 
     int len = 1 << 4;
     for (int count = 12; count > 0; count--, len <<= 1) {
-        buffer_zero_batch_task_init(&batch_task);
+        buffer_zero_batch_task_init(&batch_task, batch_size);
 
         char buf[len * batch_size];
         char *addrs[batch_size];
@@ -281,7 +281,7 @@ static void test_multiple_engines(void)
     g_assert(tasks[0].device != tasks[1].device);
 
     for (int i = 0; i < num_devices; i++) {
-        buffer_zero_batch_task_init(&tasks[i]);
+        buffer_zero_batch_task_init(&tasks[i], batch_size);
 
         for (int j = 0; j < batch_size; j++) {
             addrs[i][j] = bufs[i] + (page_size * j);

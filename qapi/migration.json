@@ -769,6 +769,10 @@
 #     and the destination must already have access to the same backing
 #     chain as was used on the source.  (since 2.10)
 #
+# @multifd-packet-size: Packet size used to migrate data. This value
+#     needs to be a multiple of qemu_target_page_size(). The default
+#     value is (512 * 1024) (Since 8.0)
+#
 # @multifd-channels: Number of channels used to migrate data in
 #     parallel.  This is the same number that the number of sockets
 #     used for migration.  The default value is 2 (since 4.0)
@@ -834,7 +838,7 @@
            'downtime-limit',
            { 'name': 'x-checkpoint-delay', 'features': [ 'unstable' ] },
            'block-incremental',
-           'multifd-channels',
+           'multifd-packet-size', 'multifd-channels',
            'xbzrle-cache-size', 'max-postcopy-bandwidth',
            'max-cpu-throttle', 'multifd-compression',
            'multifd-zlib-level' ,'multifd-zstd-level',
@@ -927,6 +931,10 @@
 #     and the destination must already have access to the same backing
 #     chain as was used on the source.  (since 2.10)
 #
+# @multifd-packet-size: Packet size used to migrate data. This value
+#     needs to be a multiple of qemu_target_page_size(). The default
+#     value is (512 * 1024) (Since 8.0)
+#
 # @multifd-channels: Number of channels used to migrate data in
 #     parallel.  This is the same number that the number of sockets
 #     used for migration.  The default value is 2 (since 4.0)
@@ -1005,6 +1013,7 @@
             '*x-checkpoint-delay': { 'type': 'uint32',
                                      'features': [ 'unstable' ] },
             '*block-incremental': 'bool',
+            '*multifd-packet-size' : 'uint64',
             '*multifd-channels': 'uint8',
             '*xbzrle-cache-size': 'size',
             '*max-postcopy-bandwidth': 'size',
@@ -1122,6 +1131,10 @@
 #     and the destination must already have access to the same backing
 #     chain as was used on the source.  (since 2.10)
 #
+# @multifd-packet-size: Packet size used to migrate data. This value
+#     needs to be a multiple of qemu_target_page_size(). The default
+#     value is (512 * 1024) (Since 8.0)
+#
 # @multifd-channels: Number of channels used to migrate data in
 #     parallel.  This is the same number that the number of sockets
 #     used for migration.  The default value is 2 (since 4.0)
@@ -1197,6 +1210,7 @@
             '*x-checkpoint-delay': { 'type': 'uint32',
                                      'features': [ 'unstable' ] },
             '*block-incremental': 'bool',
+            '*multifd-packet-size': 'uint64',
             '*multifd-channels': 'uint8',
             '*xbzrle-cache-size': 'size',
             '*max-postcopy-bandwidth': 'size',

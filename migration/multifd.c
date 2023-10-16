@@ -1093,7 +1093,7 @@ static void multifd_new_send_channel_async(QIOTask *task, gpointer opaque)
 int multifd_save_setup(Error **errp)
 {
     int thread_count;
-    uint32_t page_count = MULTIFD_PACKET_SIZE / qemu_target_page_size();
+    uint32_t page_count = migrate_multifd_packet_size() / qemu_target_page_size();
     uint8_t i;
 
     if (!migrate_multifd()) {
@@ -1121,7 +1121,7 @@ int multifd_save_setup(Error **errp)
         p->addr = g_new0(ram_addr_t, page_count);
         p->dsa_batch_task = 
             (struct buffer_zero_batch_task *)qemu_memalign(64, sizeof(*p->dsa_batch_task));
-        buffer_zero_batch_task_init(p->dsa_batch_task);
+        buffer_zero_batch_task_init(p->dsa_batch_task, page_count);
         p->packet_len = sizeof(MultiFDPacket_t)
                       + sizeof(uint64_t) * page_count;
         p->packet = g_malloc0(p->packet_len);
@@ -1368,7 +1368,7 @@ static void *multifd_recv_thread(void *opaque)
 int multifd_load_setup(Error **errp)
 {
     int thread_count;
-    uint32_t page_count = MULTIFD_PACKET_SIZE / qemu_target_page_size();
+    uint32_t page_count = migrate_multifd_packet_size() / qemu_target_page_size();
     uint8_t i;
 
     /*

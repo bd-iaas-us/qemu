@@ -24,6 +24,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/queue.h"
+#include "qemu/memalign.h"
 #include "qemu/lockable.h"
 #include "qemu/cutils.h"
 #include "qemu/dsa.h"
@@ -435,7 +436,7 @@ submit_batch_wi_async(struct buffer_zero_batch_task *batch_task)
     int ret;
 
     assert(batch_task->task_type == DSA_BATCH_TASK);
-    assert(batch_task->batch_descriptor.desc_count <= DSA_BATCH_SIZE);
+    assert(batch_task->batch_descriptor.desc_count <= batch_task->batch_size);
     assert(batch_task->status == DSA_TASK_READY);
 
     batch_task->status = DSA_TASK_PROCESSING;
@@ -889,11 +890,22 @@ buffer_zero_cpu_fallback(struct buffer_zero_batch_task *batch_task)
  * @brief Initializes a buffer zero batch task.
  *
  * @param task A pointer to the batch task to initialize.
+ * @param batch_size The number of DSA tasks in the batch.
  */
 void
-buffer_zero_batch_task_init(struct buffer_zero_batch_task *task)
+buffer_zero_batch_task_init(struct buffer_zero_batch_task *task,
+                            int batch_size)
 {
+    int descriptors_size = sizeof(*task->descriptors) * batch_size;
     memset(task, 0, sizeof(*task));
+
+    task->descriptors = 
+        (struct dsa_hw_desc *)qemu_memalign(64, descriptors_size);
+    memset(task->descriptors, 0, descriptors_size);
+    task->completions = (struct dsa_completion_record *)qemu_memalign(
+        32, sizeof(*task->completions) * batch_size);
+    task->results = g_new0(bool, batch_size);
+    task->batch_size = batch_size;
 
     task->batch_completion.status = DSA_COMP_NONE;
     task->batch_descriptor.completion_addr = (uint64_t)&task->batch_completion;
@@ -906,7 +918,7 @@ buffer_zero_batch_task_init(struct buffer_zero_batch_task *task)
     task->group = &dsa_group;
     task->device = dsa_device_group_get_next_device(&dsa_group);
 
-    for (int i = 0; i < DSA_BATCH_SIZE; i++) {
+    for (int i = 0; i < task->batch_size; i++) {
         buffer_zero_task_init_int(&task->descriptors[i],
                                   &task->completions[i]);
     }
@@ -923,6 +935,10 @@ buffer_zero_batch_task_init(struct buffer_zero_batch_task *task)
 void
 buffer_zero_batch_task_destroy(struct buffer_zero_batch_task *task)
 {
+    qemu_vfree(task->descriptors);
+    qemu_vfree(task->completions);
+    g_free(task->results);
+
     qemu_sem_destroy(&task->sem_task_complete);
 }
 
@@ -1022,7 +1038,7 @@ buffer_zero_batch_task_set(struct buffer_zero_batch_task *batch_task,
                            const void **buf, size_t count, size_t len)
 {
     assert(count > 0);
-    assert(count <= DSA_BATCH_SIZE);
+    assert(count <= batch_task->batch_size);
 
     buffer_zero_batch_task_reset(batch_task, count);
     for (int i = 0; i < count; i++) {
@@ -1060,7 +1076,7 @@ static void
 buffer_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
                       const void **buf, size_t count, size_t len)
 {
-    assert(count <= DSA_BATCH_SIZE);
+    assert(count <= batch_task->batch_size);
 
     buffer_zero_batch_task_set(batch_task, buf, count, len);
 
@@ -1104,7 +1120,7 @@ buffer_zero_dsa_batch_add_task(struct buffer_zero_batch_task *batch_task,
 
     assert(batch_task->status == DSA_TASK_READY);
 
-    if (batch_task->batch_descriptor.desc_count >= DSA_BATCH_SIZE)
+    if (batch_task->batch_descriptor.desc_count >= batch_task->batch_size)
         return false;
 
     desc_count = batch_task->batch_descriptor.desc_count;
@@ -1128,7 +1144,7 @@ static int
 buffer_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
                             const void **buf, size_t count, size_t len)
 {
-    assert(count <= DSA_BATCH_SIZE);
+    assert(count <= batch_task->batch_size);
     buffer_zero_batch_task_set(batch_task, buf, count, len);
 
     return submit_batch_wi_async(batch_task);
@@ -1238,7 +1254,7 @@ void dsa_cleanup(void)
 int buffer_is_zero_dsa_batch(struct buffer_zero_batch_task *batch_task,
                              const void **buf, size_t count, size_t len)
 {
-    if (count <= 0 || count > DSA_BATCH_SIZE) {
+    if (count <= 0 || count > batch_task->batch_size) {
         return -1;
     }
 
@@ -1270,7 +1286,7 @@ int
 buffer_is_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
                                const void **buf, size_t count, size_t len)
 {
-    if (count <= 0 || count > DSA_BATCH_SIZE) {
+    if (count <= 0 || count > batch_task->batch_size) {
         return -1;
     }
 

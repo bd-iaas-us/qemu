@@ -15,8 +15,6 @@ typedef void (*buffer_zero_dsa_completion_fn)(void *);
 #include <linux/idxd.h>
 #include "x86intrin.h"
 
-#define DSA_BATCH_SIZE 128
-
 enum dsa_task_type {
     DSA_TASK = 0,
     DSA_BATCH_TASK
@@ -28,18 +26,22 @@ enum dsa_task_status {
     DSA_TASK_COMPLETION
 };
 
-struct buffer_zero_batch_task {
+typedef struct buffer_zero_batch_task {
     struct dsa_hw_desc batch_descriptor;
-    struct dsa_hw_desc descriptors[DSA_BATCH_SIZE] __attribute__((aligned(64)));
+    //struct dsa_hw_desc descriptors[DSA_BATCH_SIZE] __attribute__((aligned(64)));
+    struct dsa_hw_desc *descriptors;
     struct dsa_completion_record batch_completion __attribute__((aligned(32)));
-    struct dsa_completion_record completions[DSA_BATCH_SIZE] __attribute__((aligned(32)));
+    //struct dsa_completion_record completions[DSA_BATCH_SIZE] __attribute__((aligned(32)));
+    struct dsa_completion_record *completions;
     struct dsa_device_group *group;
     struct dsa_device *device;
     buffer_zero_dsa_completion_fn completion_callback;
     QemuSemaphore sem_task_complete;
     enum dsa_task_type task_type;
     enum dsa_task_status status;
-    bool results[DSA_BATCH_SIZE];
+    //bool results[DSA_BATCH_SIZE];
+    bool *results;
+    int batch_size;
     QSIMPLEQ_ENTRY(buffer_zero_batch_task) entry;
 } buffer_zero_batch_task;
 
@@ -62,8 +64,10 @@ void buffer_zero_task_init(struct buffer_zero_batch_task *task);
  * @brief Initializes a buffer zero batch task.
  *
  * @param task A pointer to the batch task to initialize.
+ * @param batch_size The number of DSA tasks in the batch.
  */
-void buffer_zero_batch_task_init(struct buffer_zero_batch_task *task);
+void buffer_zero_batch_task_init(struct buffer_zero_batch_task *task,
+                                 int batch_size);
 
 /**
  * @brief Performs the proper cleanup on a DSA batch task.
