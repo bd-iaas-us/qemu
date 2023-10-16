@@ -598,7 +598,7 @@ buffer_zero_batch_task_init(struct buffer_zero_batch_task *task)
     }
 }
 
-void
+static void
 buffer_zero_batch_task_reset(struct buffer_zero_batch_task *task)
 {
     task->batch_completion.status = DSA_COMP_NONE;
