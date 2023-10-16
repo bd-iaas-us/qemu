@@ -723,6 +723,19 @@ static bool multifd_zero_page_test_hook(uint8_t multifd_zero_page_ratio)
     return is_zero_page;
 }
 
+static void set_page(MultiFDSendParams *p, bool zero_page, uint64_t offset)
+{
+    RAMBlock *rb = p->pages->block;
+    if (zero_page) {
+        p->zero[p->zero_num] = offset;
+        p->zero_num++;
+        ram_release_page(rb->idstr, offset);
+    } else {
+        p->normal[p->normal_num] = offset;
+        p->normal_num++;
+    }
+}
+
 static void multifd_zero_page_check(MultiFDSendParams *p,
                                     uint8_t multifd_zero_page_ratio)
 {
@@ -740,15 +753,7 @@ static void multifd_zero_page_check(MultiFDSendParams *p,
                 zero_page = false;
             }
         }
-
-        if (zero_page) {
-            p->zero[p->zero_num] = offset;
-            p->zero_num++;
-            ram_release_page(rb->idstr, offset);
-        } else {
-            p->normal[p->normal_num] = offset;
-            p->normal_num++;
-        }
+        set_page(p, zero_page, offset);
     }
 }
 
@@ -779,13 +784,8 @@ static void multifd_zero_page_check_batch(MultiFDSendParams *p,
 
     for (int i = 0; i < p->pages->num; i++) {
         uint64_t offset = p->pages->offset[i];
-        if (p->zero_page_results[i]) {
-            p->zero[p->zero_num] = offset;
-            p->zero_num++;
-        } else {
-            p->normal[p->normal_num] = offset;
-            p->normal_num++;
-        }
+        bool zero_page = p->zero_page_results[i];
+        set_page(p, zero_page, offset);
     }
 }
 
