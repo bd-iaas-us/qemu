@@ -1151,7 +1151,7 @@ buffer_zero_dsa_batch_async(struct buffer_zero_batch_task *batch_task,
 static void
 dsa_globals_init(void)
 {
-    dedicated_mode = true;
+    dedicated_mode = false;
     atomic = false;
     max_retry_count = UINT64_MAX;
     memset(&dsa_counters, 0, sizeof(dsa_counters));

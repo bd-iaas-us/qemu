@@ -377,10 +377,11 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
             }
         }
 
-        assert(params->has_multifd_zero_page_ratio);
-        monitor_printf(mon, "%s: %u\n",
-            MigrationParameter_str(MIGRATION_PARAMETER_MULTIFD_ZERO_PAGE_RATIO),
-            params->multifd_zero_page_ratio);
+        if (params->has_multifd_zero_page_ratio) {
+            monitor_printf(mon, "%s: %u\n",
+                MigrationParameter_str(MIGRATION_PARAMETER_MULTIFD_ZERO_PAGE_RATIO),
+                params->multifd_zero_page_ratio);
+        }
     }
 
     qapi_free_MigrationParameters(params);

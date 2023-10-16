@@ -28,7 +28,7 @@ enum dsa_task_status {
     DSA_TASK_COMPLETION
 };
 
-typedef struct buffer_zero_batch_task {
+struct buffer_zero_batch_task {
     struct dsa_hw_desc batch_descriptor;
     struct dsa_hw_desc descriptors[DSA_BATCH_SIZE] __attribute__((aligned(64)));
     struct dsa_completion_record batch_completion __attribute__((aligned(32)));

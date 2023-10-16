@@ -45,6 +45,7 @@ unsigned end_address;
 static bool uffd_feature_thread_id;
 static bool got_src_stop;
 static bool got_dst_resume;
+static const char* dsa_arg = "-dsa-accelerate /dev/dsa/wq4.0";
 
 /*
  * Dirtylimit stop working if dirty page rate error
@@ -2312,7 +2313,7 @@ static void test_multifd_tcp_tls_x509_reject_anon_client(void)
  *
  *  And see that it works
  */
-static void test_multifd_tcp_cancel(void)
+static void test_multifd_tcp_cancel_common(bool with_dsa)
 {
     MigrateStart args = {
         .hide_stderr = true,
@@ -2331,6 +2332,10 @@ static void test_multifd_tcp_cancel(void)
 
     migrate_set_capability(from, "multifd", true);
     migrate_set_capability(to, "multifd", true);
+
+    if (with_dsa) {
+        migrate_set_capability(from, "multifd-dsa-accel", true);
+    }
 
     /* Start incoming migration from the 1st socket */
     qtest_qmp_assert_success(to, "{ 'execute': 'migrate-incoming',"
@@ -2387,6 +2392,51 @@ static void test_multifd_tcp_cancel(void)
     wait_for_migration_complete(from);
     test_migrate_end(from, to2, true);
 }
+
+
+/*
+ * This test does:
+ *  source               target
+ *                       migrate_incoming
+ *     migrate
+ *     migrate_cancel
+ *                       launch another target
+ *     migrate
+ *
+ *  And see that it works
+ */
+static void test_multifd_tcp_cancel(void)
+{
+    test_multifd_tcp_cancel_common(false);
+}
+
+#ifdef CONFIG_DSA_OPT 
+
+static void *test_migrate_precopy_tcp_multifd_start_dsa(QTestState *from,
+                                                        QTestState *to)
+{
+    migrate_set_capability(from, "multifd-dsa-accel", true);
+    return test_migrate_precopy_tcp_multifd_start_common(from, to, "none");
+}
+
+static void test_multifd_tcp_none_dsa(void)
+{
+    MigrateCommon args = {
+        .listen_uri = "defer",
+        .start_hook = test_migrate_precopy_tcp_multifd_start_dsa,
+    };
+
+    args.start.opts_source = dsa_arg;
+
+    test_precopy_common(&args);
+}
+
+static void test_multifd_tcp_cancel_dsa(void)
+{
+    test_multifd_tcp_cancel_common(true);
+}
+
+#endif
 
 static void calc_dirty_rate(QTestState *who, uint64_t calc_time)
 {
@@ -2809,6 +2859,18 @@ int main(int argc, char **argv)
     }
     qtest_add_func("/migration/multifd/tcp/plain/none",
                    test_multifd_tcp_none);
+
+#ifdef CONFIG_DSA_OPT
+    if (g_str_equal(arch, "x86_64")) {
+        qtest_add_func("/migration/multifd/tcp/plain/none/dsa",
+                       test_multifd_tcp_none_dsa);
+    }
+    if (getenv("QEMU_TEST_FLAKY_TESTS")) {
+        qtest_add_func("/migration/multifd/tcp/plain/cancel/dsa",
+                       test_multifd_tcp_cancel_dsa);
+    }
+#endif
+
     /*
      * This test is flaky and sometimes fails in CI and otherwise:
      * don't run unless user opts in via environment variable.
