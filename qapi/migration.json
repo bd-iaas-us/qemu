@@ -508,6 +508,11 @@
 #     and should not affect the correctness of postcopy migration.
 #     (since 7.1)
 #
+# @main-zero-page: If enabled, the detection of zero pages will be
+#                  done on the main thread.  Otherwise it is done on
+#                  the multifd threads.
+#                  (since 7.1)
+#
 # @switchover-ack: If enabled, migration will not stop the source VM
 #     and complete the migration until an ACK is received from the
 #     destination that it's OK to do so.  Exactly when this ACK is
@@ -540,7 +545,7 @@
            { 'name': 'x-ignore-shared', 'features': [ 'unstable' ] },
            'validate-uuid', 'background-snapshot',
            'zero-copy-send', 'postcopy-preempt', 'switchover-ack',
-           'dirty-limit'] }
+           'dirty-limit', 'main-zero-page'] }
 
 ##
 # @MigrationCapabilityStatus:

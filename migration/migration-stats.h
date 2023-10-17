@@ -69,6 +69,10 @@ typedef struct {
      */
     Stat64 normal_pages;
     /*
+     * Number of pages transferred that were full of zeros.
+     */
+    Stat64 zero_pages;
+    /*
      * Number of bytes sent during postcopy.
      */
     Stat64 postcopy_bytes;
@@ -97,10 +101,6 @@ typedef struct {
      * Total number of bytes transferred.
      */
     Stat64 transferred;
-    /*
-     * Number of pages transferred that were full of zeros.
-     */
-    Stat64 zero_pages;
 } MigrationAtomicStats;
 
 extern MigrationAtomicStats mig_stats;
