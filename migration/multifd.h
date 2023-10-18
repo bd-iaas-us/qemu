@@ -114,6 +114,9 @@ typedef struct {
      * pending_job != 0 -> multifd_channel can use it.
      */
     MultiFDPages_t *pages;
+    /* Address of each pages in pages */
+    ram_addr_t *addr;
+    struct buffer_zero_batch_task *dsa_batch_task;
 
     /* thread local variables. No locking required */
 
