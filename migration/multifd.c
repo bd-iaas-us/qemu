@@ -684,6 +684,37 @@ int multifd_send_sync_main(QEMUFile *f)
     return 0;
 }
 
+static void multifd_normal_page_test_hook(MultiFDSendParams *p)
+{
+    /*
+     * The value is between 0 to 100. If the value is 10, it means at
+     * least 10% of the pages are normal page. A zero page can be made
+     * a normal page but not the other way around.
+     */
+    uint8_t multifd_normal_page_ratio =
+        migrate_multifd_normal_page_ratio();
+    struct buffer_zero_batch_task *dsa_batch_task = p->dsa_batch_task;
+
+    // Set normal page test hook is disabled.
+    if (multifd_normal_page_ratio > 100) {
+        return;
+    }
+
+    for (int i = 0; i < p->pages->num; i++) {
+        if (dsa_batch_task->normal_page_counter < multifd_normal_page_ratio) {
+            // Turn a zero page into a normal page.
+            dsa_batch_task->results[i] = false;
+        }
+        dsa_batch_task->normal_page_index++;
+        dsa_batch_task->normal_page_counter++;
+
+        if (dsa_batch_task->normal_page_index >= 100) {
+            dsa_batch_task->normal_page_index = 0;
+            dsa_batch_task->normal_page_counter = 0;
+        }
+    }
+}
+
 static void set_page(MultiFDSendParams *p, bool zero_page, uint64_t offset)
 {
     RAMBlock *rb = p->pages->block;
@@ -704,7 +735,8 @@ static void buffer_is_zero_use_cpu(MultiFDSendParams *p)
     assert(!dsa_is_running());
 
     for (int i = 0; i < p->pages->num; i++) {
-        p->dsa_batch_task->results[i] = buffer_is_zero(buf[i], p->page_size);
+        p->dsa_batch_task->results[i] =
+            buffer_is_zero(buf[i], p->page_size);
     }
 }
 
@@ -736,6 +768,8 @@ static void multifd_zero_page_check(MultiFDSendParams *p)
     } else {
         buffer_is_zero_use_dsa(p);
     }
+
+    multifd_normal_page_test_hook(p);
 
     for (int i = 0; i < p->pages->num; i++) {
         uint64_t offset = p->pages->offset[i];
