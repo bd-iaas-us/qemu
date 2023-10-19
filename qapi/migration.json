@@ -835,6 +835,10 @@
 # @multifd-normal-page-ratio: Test hook setting the normal page ratio.
 #     (Since 8.1)
 #
+# @multifd-packet-size: Packet size used to migrate data. This value
+#     needs to be a multiple of qemu_target_page_size(). The default
+#     value is (512 * 1024) (Since 8.0)
+#
 # Features:
 #
 # @unstable: Members @x-checkpoint-delay and @x-vcpu-dirty-limit-period
@@ -859,7 +863,7 @@
            'multifd-zlib-level', 'multifd-zstd-level',
            'block-bitmap-mapping',
            { 'name': 'x-vcpu-dirty-limit-period', 'features': ['unstable'] },
-           'vcpu-dirty-limit', 'multifd-normal-page-ratio'] }
+           'vcpu-dirty-limit', 'multifd-normal-page-ratio', 'multifd-packet-size'] }
 
 ##
 # @MigrateSetParameters:
@@ -1007,6 +1011,10 @@
 # @multifd-normal-page-ratio: Test hook setting the normal page ratio.
 #     (Since 8.1)
 #
+# @multifd-packet-size: Packet size used to migrate data. This value
+#     needs to be a multiple of qemu_target_page_size(). The default
+#     value is (512 * 1024) (Since 8.0)
+#
 # Features:
 #
 # @unstable: Members @x-checkpoint-delay and @x-vcpu-dirty-limit-period
@@ -1050,7 +1058,8 @@
                                             'features': [ 'unstable' ] },
             '*vcpu-dirty-limit': 'uint64',
             '*multifd-dsa-accel': 'StrOrNull',
-            '*multifd-normal-page-ratio': 'uint8'} }
+            '*multifd-normal-page-ratio': 'uint8',
+            '*multifd-packet-size' : 'uint64'} }
 
 ##
 # @migrate-set-parameters:
@@ -1218,6 +1227,10 @@
 # @multifd-normal-page-ratio: Test hook setting the normal page ratio.
 #     (Since 8.1)
 #
+# @multifd-packet-size: Packet size used to migrate data. This value
+#     needs to be a multiple of qemu_target_page_size(). The default
+#     value is (512 * 1024) (Since 8.0)
+#
 # Features:
 #
 # @unstable: Members @x-checkpoint-delay and @x-vcpu-dirty-limit-period
@@ -1258,7 +1271,8 @@
                                             'features': [ 'unstable' ] },
             '*vcpu-dirty-limit': 'uint64',
             '*multifd-dsa-accel': 'str',
-            '*multifd-normal-page-ratio': 'uint8'} }
+            '*multifd-normal-page-ratio': 'uint8',
+            '*multifd-packet-size': 'uint64'} }
 
 ##
 # @query-migrate-parameters:
